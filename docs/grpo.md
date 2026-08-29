@@ -33,6 +33,13 @@ unknown veRL version.
 
 Hashes are recorded in [`data/grpo/metadata.json`](../data/grpo/metadata.json).
 
+Before a formal build, `scripts/build_grpo_data.py` requires four distinct,
+non-empty SFT task-id sources with explicit identities: `process_train`,
+`process_dev`, `outcome_train`, and `outcome_dev`. Their source path, SHA-256,
+row count, and task-id hash are recorded in `metadata.json`. The launcher
+validates these records independently; setting `leakage.all_checks_passed` by
+itself is not sufficient to start GRPO.
+
 ## Run
 
 Inspect the resolved command first:
@@ -83,6 +90,11 @@ bash scripts/grpo.sh -- \
   trainer.total_training_steps=20 \
   trainer.save_freq=10
 ```
+
+For an explicit veRL 0.8 checkpoint resume, the launcher emits the registered
+Hydra value `trainer.resume_mode=resume_path` together with
+`trainer.resume_from_path=<checkpoint>`. The obsolete `resumable_path` value is
+not accepted by veRL.
 
 ## Export
 

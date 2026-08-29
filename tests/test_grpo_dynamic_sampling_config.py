@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from scripts import check_grpo_runtime
 from scripts.check_grpo_runtime import (
     PATCH_MARKER,
     compose_runtime_config,
@@ -86,8 +89,23 @@ class DynamicSamplingConfigTest(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "patch marker is missing"):
                 validate_dynamic_sampling(config, verl_source, {"verl": "0.8.0"})
 
+            # marker 之外还必须比对最终 patched SHA256（audit item 5）：
+            # 带 marker 但 SHA 不匹配的文件同样拒绝。
             trainer_source.write_text(f"# {PATCH_MARKER}\n", encoding="utf-8")
-            validate_dynamic_sampling(config, verl_source, {"verl": "0.8.0"})
+            with self.assertRaisesRegex(SystemExit, "SHA256 mismatch"):
+                validate_dynamic_sampling(config, verl_source, {"verl": "0.8.0"})
+
+            actual = hashlib.sha256(trainer_source.read_bytes()).hexdigest()
+            with patch.object(check_grpo_runtime, "EXPECTED_PATCHED_SHA256", actual):
+                validate_dynamic_sampling(config, verl_source, {"verl": "0.8.0"})
+
+    def test_ref_must_not_override_actor_model_path(self):
+        """冻结 ref = actor 同一个 M2 merged；ref.model 覆盖必须被拒绝。"""
+        config = compose_runtime_config([])
+        self.assertNotIn("model", config.actor_rollout_ref.ref)
+        check_grpo_runtime.validate_actor_ref_model_contract(
+            {"actor_rollout_ref": dict(config.actor_rollout_ref)}
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

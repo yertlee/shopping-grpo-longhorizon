@@ -11,8 +11,15 @@ import sys
 from copy import deepcopy
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
+
+from shopping_grpo.training.sft.run_manifest import (  # noqa: E402
+    FROZEN_MODEL_REVISION,
+    validate_model_revision,
+)
+
 DEFAULT_REGISTRY = ROOT / "configs/experiments.json"
 TARGET_MODULE_PRESETS = {
     "attention_only": ("q_proj", "k_proj", "v_proj", "o_proj"),
@@ -82,6 +89,10 @@ def _positive(settings: dict, *keys: str) -> None:
 
 def _validate_settings(stage: str, settings: dict) -> None:
     if stage == "sft":
+        try:
+            validate_model_revision(settings.get("revision", FROZEN_MODEL_REVISION))
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
         _positive(settings, "learning_rate", "epochs", "lora_rank", "lora_alpha", "subset_seed")
         if settings["target_modules"] not in TARGET_MODULE_PRESETS:
             raise ValueError(f"unknown target_modules preset: {settings['target_modules']!r}")
@@ -127,6 +138,7 @@ def build_experiment(
     model: str | Path | None = None,
     train_data: Path | None = None,
     validation_data: Path | None = None,
+    revision: str | None = None,
 ) -> tuple[list[str], dict[str, str], Path]:
     root = Path(root).resolve()
     output_root = Path(output_root)
@@ -134,6 +146,9 @@ def build_experiment(
         output_root = root / output_root
     output = output_root / experiment["name"]
     settings = experiment["settings"]
+    if experiment["stage"] == "sft":
+        revision = revision or settings.get("revision", FROZEN_MODEL_REVISION)
+        validate_model_revision(revision)
     environment = dict(os.environ)
     source_path = str(root / "src")
     existing_python_path = environment.get("PYTHONPATH")
@@ -147,6 +162,7 @@ def build_experiment(
             _python(root),
             "scripts/train_lora_sft.py",
             "--model", str(model or "Qwen/Qwen3.5-2B"),
+            "--revision", revision,
             "--train", str(train_data or root / "data/sft/train.jsonl"),
             "--validation", str(validation_data or root / "data/sft/validation.jsonl"),
             "--output", str(output),
@@ -206,6 +222,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model")
     parser.add_argument("--train-data", type=Path)
     parser.add_argument("--validation-data", type=Path)
+    parser.add_argument(
+        "--revision",
+        default=None,
+        help="覆盖 SFT 基座模型 revision；必须为项目冻结值",
+    )
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -213,15 +234,17 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    experiment = resolve_experiment(
-        load_registry(args.config), args.experiment_name, args.set
-    )
+    overrides = list(args.set)
+    if args.revision is not None:
+        overrides.append(f"revision={json.dumps(args.revision)}")
+    experiment = resolve_experiment(load_registry(args.config), args.experiment_name, overrides)
     command, environment, output = build_experiment(
         experiment,
         output_root=args.output_root,
         model=args.model,
         train_data=args.train_data,
         validation_data=args.validation_data,
+        revision=args.revision,
     )
     print(json.dumps({"experiment": experiment, "command": command, "output": str(output)}, indent=2))
     if args.dry_run:

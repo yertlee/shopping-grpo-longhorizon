@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""在固定 ShopSimulator benchmark 上评测 OpenAI-compatible 本地或远端模型。"""
+"""LEGACY：在固定 ShopSimulator benchmark 上评测 OpenAI-compatible 模型。
+
+这是历史入口：只写 raw trajectory 与旧 summary，未接入统一 rubric/judge
+contract、blind guard、cache/resume 与 paired statistics。
+commerce-agent-posttrain 实验的正式评测入口是 scripts/evaluate_student.py
+（见 WP1）；本脚本不得作为 M0–M3 的正式评测结果来源。
+"""
 
 import argparse
 import json

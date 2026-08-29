@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import sys
 import time as _time
 from functools import partial
 from pathlib import Path
@@ -12,6 +13,20 @@ from shopping_grpo.evaluation.blind_guard import guard_blind_final
 from shopping_grpo.training.sft.dataset import (
     load_supervised_examples,
     select_training_examples,
+)
+from shopping_grpo.training.sft.run_manifest import (
+    FROZEN_MODEL_REVISION,
+    build_run_manifest,
+    finalize_run_manifest,
+    hash_weight_files,
+    load_run_manifest,
+    CHECKPOINT_OWNER_FILE,
+    sha256_file,
+    validate_checkpoint_owner,
+    write_checkpoint_owner,
+    write_run_manifest,
+    validate_model_revision,
+    validate_run_id,
 )
 
 DEFAULT_TARGET_MODULES = (
@@ -29,6 +44,150 @@ DEFAULT_TARGET_MODULES = (
     "in_proj_a",
     "out_proj",
 )
+
+# ---- Run manifest 状态：main() 写入；失败时由 __main__ 钩子落盘。 ----
+_RUN_STATE = {
+    "manifest_path": None,
+    "train_examples": None,
+    "validation_examples": None,
+}
+
+
+def _dependency_versions():
+    from importlib.metadata import PackageNotFoundError, version
+
+    result = {}
+    for package in ("torch", "transformers", "peft", "accelerate", "safetensors", "liger-kernel", "bitsandbytes"):
+        try:
+            result[package] = version(package)
+        except PackageNotFoundError:
+            result[package] = None
+    return result
+
+
+def _gpu_info(torch):
+    if not torch.cuda.is_available():
+        return {"available": False, "name": None, "device_count": 0, "cuda_runtime": torch.version.cuda}
+    return {
+        "available": True,
+        "name": torch.cuda.get_device_name(0),
+        "device_count": torch.cuda.device_count(),
+        "cuda_runtime": torch.version.cuda,
+    }
+
+
+def _code_hashes():
+    import shopping_grpo.training.sft.dataset as dataset_module
+    import shopping_grpo.training.sft.run_manifest as run_manifest_module
+
+    return {
+        "scripts/train_lora_sft.py": sha256_file(Path(__file__).resolve()),
+        "src/shopping_grpo/training/sft/dataset.py": sha256_file(Path(dataset_module.__file__).resolve()),
+        "src/shopping_grpo/training/sft/run_manifest.py": sha256_file(
+            Path(run_manifest_module.__file__).resolve()
+        ),
+    }
+
+
+def _manifest_drift(existing: dict, candidate: dict) -> list[str]:
+    """比较两个 manifest 的身份部分；execution/result 与运行时产物计数不参与。"""
+    drift = []
+    for section in ("model", "data", "recipe", "runtime"):
+        old = existing.get(section) or {}
+        new = candidate.get(section) or {}
+        for key in sorted(set(old) | set(new)):
+            if section == "data" and key in {"train_examples", "validation_examples"}:
+                continue  # finalize 阶段回填的运行时产物，不是合同
+            if old.get(key) != new.get(key):
+                drift.append(f"{section}.{key}: {old.get(key)!r} -> {new.get(key)!r}")
+    return drift
+
+
+def _write_failure_manifest_if_pending():
+    """main() 未走到成功 finalize 时，把失败写进 run manifest；不吞异常。"""
+    path = _RUN_STATE["manifest_path"]
+    if path is None:
+        return
+    manifest = load_run_manifest(path)
+    if manifest["execution"]["exit_code"] is not None:
+        return
+    exc = sys.exc_info()[1]
+    finalize_run_manifest(
+        manifest,
+        train_examples=_RUN_STATE["train_examples"] or 0,
+        validation_examples=_RUN_STATE["validation_examples"] or 0,
+        train_loss=None,
+        eval_loss=None,
+        peak_gpu_memory_gib=None,
+        checkpoint_paths=sorted(
+            str(path)
+            for path in _RUN_STATE["manifest_path"].parent.glob("checkpoint-*")
+            if path.is_dir()
+        ),
+        exit_code=1,
+        error=f"{exc.__class__.__name__}: {exc}" if exc is not None else "interrupted",
+    )
+    write_run_manifest(path, manifest)
+    print(f"[run-manifest] 已记录失败状态到 {path}", flush=True)
+
+
+def _validate_resume_checkpoint(path: str, output: Path, manifest: dict) -> Path:
+    """Ensure a resume checkpoint is present and cryptographically self-consistent.
+
+    ``execution.checkpoint_paths`` is a post-run inventory and is deliberately
+    not an ownership proof: an attacker can edit that mutable field.  The
+    checkpoint must carry an owner sidecar created by the Trainer callback,
+    bound to this manifest's immutable run_id and its actual relative path.
+    """
+    checkpoint = Path(path).expanduser()
+    if not checkpoint.is_dir():
+        raise SystemExit(f"resume checkpoint 不存在或不是目录：{checkpoint}")
+    try:
+        checkpoint_resolved = checkpoint.resolve(strict=True)
+        output_resolved = output.resolve(strict=True)
+        checkpoint_resolved.relative_to(output_resolved)
+    except (FileNotFoundError, ValueError) as exc:
+        raise SystemExit(
+            "resume checkpoint 必须位于当前 --output 目录内；拒绝 foreign checkpoint："
+            f" {checkpoint}"
+        ) from exc
+    run_id = manifest.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        raise SystemExit(
+            "run_manifest 缺少 run_id；拒绝无法证明归属的 checkpoint"
+        )
+    state_path = checkpoint_resolved / "trainer_state.json"
+    if not state_path.is_file():
+        raise SystemExit(
+            f"resume checkpoint 缺少 trainer_state.json，无法核对 global_step：{checkpoint}"
+        )
+    try:
+        trainer_state = json.loads(state_path.read_text(encoding="utf-8"))
+        global_step = int(trainer_state["global_step"])
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        raise SystemExit(
+            f"resume checkpoint trainer_state.json 缺少有效 global_step：{checkpoint}"
+        ) from exc
+    owner_path = checkpoint_resolved / CHECKPOINT_OWNER_FILE
+    if not owner_path.is_file():
+        raise SystemExit(
+            f"resume checkpoint 缺少 ownership sidecar {CHECKPOINT_OWNER_FILE}：{checkpoint}"
+        )
+    try:
+        owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        relative = checkpoint_resolved.relative_to(output_resolved).as_posix()
+        validate_checkpoint_owner(
+            owner,
+            run_id=run_id,
+            checkpoint_path=relative,
+            global_step=global_step,
+            checkpoint_dir=checkpoint_resolved,
+        )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise SystemExit(
+            f"resume checkpoint ownership sidecar 校验失败，拒绝续训：{checkpoint} ({exc})"
+        ) from exc
+    return checkpoint_resolved
 
 
 def parse_args():
@@ -93,6 +252,24 @@ def parse_args():
     parser.add_argument("--train-ratio", type=float, default=None)
     parser.add_argument("--subset-seed", type=int, default=42)
     parser.add_argument("--resume-from-checkpoint", default=None)
+    parser.add_argument(
+        "--stage",
+        choices=("smoke", "process", "outcome"),
+        default=None,
+        help="写入 run manifest 的 stage 标记；缺省记为 unspecified。",
+    )
+    parser.add_argument(
+        "--sft-ready-manifest",
+        type=Path,
+        default=None,
+        help="teacher-sft-ready manifest 路径；其 SHA256 会被记录进 run manifest。",
+    )
+    parser.add_argument(
+        "--preflight-report",
+        type=Path,
+        default=None,
+        help="最终 preflight report 路径；其 SHA256 会被记录进 run manifest。",
+    )
     parser.add_argument("--max-steps", type=int, default=-1, help="最大训练步数（-1=完整 epoch）；用于冒烟测试")
     parser.add_argument("--swanlab", action="store_true", help="启用 SwanLab 训练监控")
     parser.add_argument("--swanlab-project", default="shopping-grpo", help="SwanLab project 名")
@@ -338,6 +515,10 @@ def _collate(batch, pad_token_id, torch):
 def main():
     _start_time = _time.time()
     args = parse_args()
+    try:
+        validate_model_revision(args.revision)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     if args.max_length < 1 or args.epochs <= 0:
         raise SystemExit("--max-length 与 --epochs 必须为正数")
     if bool(args.curriculum_manifest) != bool(args.curriculum_stage):
@@ -376,6 +557,83 @@ def main():
         TrainerCallback,
         TrainingArguments,
     ) = _training_dependencies()
+    dtype_name, dtype = _resolve_dtype(args, torch)
+
+    # ---- Run manifest：先固化输入 / 配方 / 代码 hash；失败也要留下可审计记录。 ----
+    manifest_path = args.output / "run_manifest.json"
+    args.output.mkdir(parents=True, exist_ok=True)
+    run_manifest = build_run_manifest(
+        stage=args.stage or "unspecified",
+        model_path=args.model,
+        model_revision=args.revision,
+        weights=hash_weight_files(args.model),
+        train_path=args.train,
+        validation_path=args.validation,
+        sft_ready_manifest_path=args.sft_ready_manifest,
+        preflight_report_path=args.preflight_report,
+        recipe={
+            "max_length": args.max_length,
+            "epochs": args.epochs,
+            "per_device_train_batch_size": args.per_device_train_batch_size,
+            "per_device_eval_batch_size": args.per_device_eval_batch_size,
+            "gradient_accumulation_steps": args.gradient_accumulation_steps,
+            "learning_rate": args.learning_rate,
+            "warmup_ratio": args.warmup_ratio,
+            "lora_r": args.lora_r,
+            "lora_alpha": args.lora_alpha,
+            "lora_dropout": args.lora_dropout,
+            "target_modules": list(args.target_modules),
+            "dtype": dtype_name,
+            "attention": args.attention_implementation,
+            "liger_kernel": args.liger_kernel,
+            "qlora": args.qlora,
+            "gradient_checkpointing": args.gradient_checkpointing,
+            "seed": args.seed,
+            "subset_seed": args.subset_seed,
+            "train_count": args.train_count,
+            "train_ratio": args.train_ratio,
+            "max_steps": args.max_steps,
+            "curriculum_stage": args.curriculum_stage,
+        },
+        code_hashes=_code_hashes(),
+        dependency_versions=_dependency_versions(),
+        gpu=_gpu_info(torch),
+        command=list(sys.argv),
+        resume_from_checkpoint=args.resume_from_checkpoint,
+    )
+    existing_manifest = None
+    if manifest_path.is_file():
+        existing_manifest = load_run_manifest(manifest_path)
+        if not args.resume_from_checkpoint:
+            raise SystemExit(
+                f"输出目录已有 run manifest，拒绝覆盖：{manifest_path}；"
+                "续训请使用 --resume-from-checkpoint，或为本次运行指定新的 --output 目录"
+            )
+        identity = validate_run_id(existing_manifest)
+        if not identity["passed"]:
+            raise SystemExit(
+                "resume 前原始 run_manifest 的 run_id 校验失败："
+                f" recorded={identity['actual']!r} recomputed={identity['expected']!r}"
+            )
+        _validate_resume_checkpoint(args.resume_from_checkpoint, args.output, existing_manifest)
+        drift = _manifest_drift(existing_manifest, run_manifest)
+        if existing_manifest["run_id"] != run_manifest["run_id"] or drift:
+            detail = "\n  ".join(drift) if drift else (
+                f"run_id {existing_manifest['run_id']} != {run_manifest['run_id']}"
+            )
+            raise SystemExit(
+                "resume 前合同漂移检查失败：当前模型/数据/配方/代码与该 checkpoint "
+                f"的原始 run 不一致，拒绝续训（--output={args.output}）。\n漂移项：\n  {detail}"
+            )
+        # Preserve the finalized source manifest.  A resume is a new execution
+        # record with the same identity, so finalize/failure handling cannot
+        # accidentally report or overwrite the original run.
+        resume_index = 1
+        while (args.output / f"run_manifest.resume.{resume_index}.json").exists():
+            resume_index += 1
+        manifest_path = args.output / f"run_manifest.resume.{resume_index}.json"
+    write_run_manifest(manifest_path, run_manifest)
+    _RUN_STATE["manifest_path"] = manifest_path
 
     # --- Progress callback: 只补充 Trainer 默认没有的耗时和显存指标。 ---
     class ProgressCallback(TrainerCallback):
@@ -408,6 +666,21 @@ def main():
         def on_epoch_end(self, args, state, control, **kwargs):
             epoch_time = _time.time() - self.epoch_start if self.epoch_start else 0
             print(f"  EPOCH {int(state.epoch)} 完成  耗时={epoch_time/60:.1f}min")
+
+    class CheckpointOwnershipCallback(TrainerCallback):
+        """Bind every Transformers checkpoint to this run after it is saved."""
+
+        def on_save(self, args, state, control, **kwargs):
+            if not state.is_world_process_zero:
+                return control
+            checkpoint = Path(args.output_dir) / f"checkpoint-{int(state.global_step)}"
+            write_checkpoint_owner(
+                checkpoint,
+                output_dir=args.output_dir,
+                run_id=run_manifest["run_id"],
+                global_step=int(state.global_step),
+            )
+            return control
 
     tokenizer, chat_template, is_multimodal = _load_preprocessing_components(
         args.model,
@@ -443,6 +716,7 @@ def main():
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     train_stats["selected"] = len(train_examples)
+    _RUN_STATE["train_examples"] = len(train_examples)
     print("train_data=", train_stats)
     if not train_examples:
         raise SystemExit("训练集没有可用样本；请检查 data/sft/ 中的 JSONL 格式")
@@ -462,8 +736,8 @@ def main():
         print("validation_data=", validation_stats)
         if not validation_examples:
             raise SystemExit("验证集没有可用样本；请调整划分或 --max-length")
+        _RUN_STATE["validation_examples"] = len(validation_examples)
 
-    dtype_name, dtype = _resolve_dtype(args, torch)
     model_class = AutoModelForMultimodalLM if is_multimodal else AutoModelForCausalLM
 
     # ---- Phase 2: 加载模型 + LoRA ----
@@ -502,6 +776,7 @@ def main():
         ),
     )
     model.print_trainable_parameters()
+    trainable_params, total_params = model.get_nb_trainable_parameters()
 
     args.output.mkdir(parents=True, exist_ok=True)
     report_to, run_name = _swanlab_config(args)
@@ -546,7 +821,7 @@ def main():
         train_dataset=_torch_dataset(train_examples, torch),
         eval_dataset=_torch_dataset(validation_examples, torch) if validation_examples else None,
         data_collator=partial(_collate, pad_token_id=tokenizer.pad_token_id, torch=torch),
-        callbacks=[ProgressCallback()],
+        callbacks=[ProgressCallback(), CheckpointOwnershipCallback()],
     )
     result = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
     trainer.save_model(str(args.output))
@@ -576,6 +851,13 @@ def main():
             "attention_implementation": args.attention_implementation,
             "qlora": args.qlora,
         },
+        "lora": {
+            "trainable_parameters": trainable_params,
+            "total_parameters": total_params,
+            "trainable_ratio": (trainable_params / total_params) if total_params else None,
+            "target_modules": list(args.target_modules),
+            "is_multimodal": is_multimodal,
+        },
         "arguments": vars(args),
     }
 
@@ -594,6 +876,26 @@ def main():
 
     print(f"LoRA adapter 已保存到 {args.output}")
 
+    # ---- 用实际运行结果 finalize run manifest。 ----
+    train_loss = float(result.training_loss) if result.training_loss is not None else None
+    eval_loss_raw = result.metrics.get("eval_loss")
+    eval_loss = float(eval_loss_raw) if eval_loss_raw is not None else None
+    run_manifest = finalize_run_manifest(
+        run_manifest,
+        train_examples=len(train_examples),
+        validation_examples=len(validation_examples),
+        train_loss=train_loss,
+        eval_loss=eval_loss,
+        peak_gpu_memory_gib=round(gpu_peak, 2),
+        checkpoint_paths=sorted(str(path) for path in args.output.glob("checkpoint-*")),
+        exit_code=0,
+    )
+    write_run_manifest(manifest_path, run_manifest)
+    print(f"run manifest 已写入 {manifest_path} (run_id={run_manifest['run_id']})")
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        _write_failure_manifest_if_pending()

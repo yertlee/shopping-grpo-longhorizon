@@ -20,13 +20,31 @@ from shopping_grpo.environment.product_id import PRODUCT_ID_CAPTURE
 DETERMINISTIC_METRICS_VERSION = "shopping-deterministic-metrics-v1"
 REWARD_V3 = "shopsimulator-reward-v3"
 _ASIN = re.compile(rf"(?<!\d){PRODUCT_ID_CAPTURE}(?!\d)")
-_INFRASTRUCTURE_ERROR_TYPES = {
-    "ContextBudgetError",
-    "RemoteDisconnected",
-    "ShopHttpError",
-    "TimeoutError",
-    "URLError",
-}
+
+# 基础设施错误 taxonomy 的唯一定义处：driver 捕获异常与 metrics 分类轨迹错误
+# 都必须使用这里的一套名字，不允许各自再写一份。默认覆盖环境租约/服务故障
+# （ShopEnvironmentError / ShopHttpError）、传输层故障（URLError /
+# RemoteDisconnected / ConnectionError / TimeoutError / OSError）与上下文硬限。
+# driver 可通过 compute_deterministic_metrics(infrastructure_error_types=...)
+# 注入扩展名集合，但基础集合只在这里维护。
+INFRASTRUCTURE_ERROR_TYPES = frozenset(
+    {
+        "ConnectionError",
+        "ContextBudgetError",
+        "OSError",
+        "RemoteDisconnected",
+        "ShopEnvironmentError",
+        "ShopHttpError",
+        "TimeoutError",
+        "URLError",
+    }
+)
+
+
+def extend_infrastructure_error_types(extra) -> frozenset[str]:
+    """返回基础 taxonomy 加上注入扩展名后的新集合（不修改基础定义）。"""
+
+    return frozenset(set(INFRASTRUCTURE_ERROR_TYPES) | {str(name) for name in (extra or ())})
 
 
 def _canonical_parameters(parameters: object) -> dict:
@@ -101,8 +119,16 @@ def _strict_success(normalized: Mapping, reward_detail: Mapping) -> bool:
     )
 
 
-def compute_deterministic_metrics(normalized: object) -> dict:
-    """从一条标准化轨迹计算代码拥有的确定性指标。"""
+def compute_deterministic_metrics(
+    normalized: object,
+    *,
+    infrastructure_error_types: frozenset[str] | None = None,
+) -> dict:
+    """从一条标准化轨迹计算代码拥有的确定性指标。
+
+    ``infrastructure_error_types`` 允许 driver 注入扩展的 infra taxonomy；
+    缺省使用本模块唯一定义的 :data:`INFRASTRUCTURE_ERROR_TYPES`。
+    """
 
     if not isinstance(normalized, Mapping):
         raise TypeError("normalized trajectory must be an object")
@@ -203,11 +229,16 @@ def compute_deterministic_metrics(normalized: object) -> dict:
     trajectory_error_type = _error_type(trajectory_error)
     release_error_type = _error_type(release_error)
     # 基础设施失败仍保留在结果中，但不会进入可比较的 Judge 样本。
+    infrastructure_types = (
+        infrastructure_error_types
+        if infrastructure_error_types is not None
+        else INFRASTRUCTURE_ERROR_TYPES
+    )
     infrastructure_invalid = bool(
         normalized.get("infrastructure_invalid")
         or release_error
-        or trajectory_error_type in _INFRASTRUCTURE_ERROR_TYPES
-        or release_error_type in _INFRASTRUCTURE_ERROR_TYPES
+        or trajectory_error_type in infrastructure_types
+        or release_error_type in infrastructure_types
     )
     contract_issues = []
     if normalized.get("status") == "done":

@@ -179,7 +179,13 @@ def main() -> None:
             print(f"verified veRL dynamic-sampling patch: {target}")
         else:
             apply_patch(target)
-    except (OSError, RuntimeError, subprocess.CalledProcessError, py_compile.PyCompileError) as exc:
+    except (
+        OSError,
+        RuntimeError,
+        importlib.metadata.PackageNotFoundError,
+        subprocess.CalledProcessError,
+        py_compile.PyCompileError,
+    ) as exc:
         raise SystemExit(f"veRL dynamic-sampling patch error: {exc}") from exc
 
 

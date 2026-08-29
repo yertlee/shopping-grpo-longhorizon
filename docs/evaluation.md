@@ -347,7 +347,7 @@ Reward 与 Rubric 冲突时两者都保留。例如 Reward 判为 gold，但 Rub
 - Observation 截断和上下文使用；
 - infrastructure-invalid 数量及 task IDs。
 
-汇总时始终以 183 为固定分母。最后按 `task_id` 对 Baseline、SFT、GRPO 做配对比较，
+汇总时始终以 Final-200 Clean 的 200 为固定分母（Final-183 只是历史归档集，不得进入当前 CLI、summary 或报告标题）。最后按 `task_id` 对 Baseline、SFT、GRPO 做配对比较，
 统计成功状态迁移、Reward type 迁移、hard violation 差值、五维分数差值、步数、
 Guard 和重复动作变化；仍然不生成一个综合总分。
 

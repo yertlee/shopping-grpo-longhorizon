@@ -1,0 +1,78 @@
+{
+  "_example_note": "EXAMPLE ONLY：本文件由 scripts/build_grpo_data.py 在 3–5 个 fake task 的 注入式测试夹具上生成，仅用于展示 metadata schema；真实 data/grpo/metadata.json 必须在持有冻结 split manifest / task facts 的环境里构建，且真实 parquet 写入需要安装 pyarrow（见 pyproject.toml 的 grpo extra），并显式提供四个 SFT task id 文件做泄漏检查。",
+  "audit": {
+    "excluded_reason_counts": {
+      "required_option_not_exposed": 1
+    },
+    "excluded_task_count": 1,
+    "excluded_tasks": [
+      {
+        "reasons": [
+          "required_option_not_exposed"
+        ],
+        "split": "grpo_train",
+        "status": "excluded_unreachable",
+        "task_id": 20
+      }
+    ]
+  },
+  "build_parameters": {
+    "max_prompt_tokens": 4096,
+    "prompt_length_audit": "enforced",
+    "sft_leak_check": "example",
+    "sft_task_id_sources": [],
+    "splits": [
+      "grpo_train",
+      "grpo_validation"
+    ],
+    "tokenizer": "fake-counter",
+    "writer": "<lambda>"
+  },
+  "example": true,
+  "files": {
+    "grpo_train": {
+      "file_sha256": "5605280ae8d7461a9885fc3cdebb9bc45172a48571e54e72131ee1deaac48a9b",
+      "included_task_ids_sha256": "13de636553213a61cefbebb2c87009d1d128347063138f809bf38bd975de72f1",
+      "path": "train.parquet",
+      "requested_task_ids_sha256": "7784d2c72a24031b6f93509c2163a212b3d7388f1ac7513692bd69e742e8b976",
+      "rows": 2,
+      "unique_task_ids": 2
+    },
+    "grpo_validation": {
+      "file_sha256": "bdfe445fa761bf35fd364af67fa32d4aa398f26dcc877478028459c3a4c78e86",
+      "included_task_ids_sha256": "b090f0a6d83dcdc52d960ce6182e5c7a322a4e311667988338b6c17079ff1f99",
+      "path": "validation.parquet",
+      "requested_task_ids_sha256": "b090f0a6d83dcdc52d960ce6182e5c7a322a4e311667988338b6c17079ff1f99",
+      "rows": 2,
+      "unique_task_ids": 2
+    }
+  },
+  "leakage": {
+    "all_checks_passed": true,
+    "sft_task_id_check": {
+      "checked": false,
+      "overlaps": {},
+      "scope": "example"
+    },
+    "train_final_overlap": [],
+    "train_teacher_pool_overlap": [],
+    "train_validation_overlap": [],
+    "validation_final_overlap": [],
+    "validation_teacher_pool_overlap": []
+  },
+  "schema_version": "shopping-grpo-data-metadata-v2",
+  "source": {
+    "environment_version": "shopsimulator-environment-v2.1",
+    "reward_version": "shopsimulator-reward-v3",
+    "runtime_contract_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "split_manifest_declared_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "split_manifest_file_sha256": "5061bd11a8354bdc33606d0a33d4ae5dde340516424d892f98dbdc61a639996c",
+    "system_prompt_sha256": "674763bfc136849045b520b47290104ebbcb024fa5430104cefe86b32db247fd",
+    "task_facts_sha256": "91af029afe2dd50cbf511f84ad7658fa7eebc638a7fd00af0bfa5c7a6d9321a4",
+    "task_reachability_declared_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "task_reachability_manifest_sha256": "f3e2facf3bb1d730d654fbf1489c5f2e4e981981bc3d5aa8e3eb443fcebb3fe7",
+    "tool_schema_sha256": "9eccfc80db97f7fb9b34eea2f2f65f0b8bcb9bae76d8c2ee031db99c435ee1ad",
+    "tool_version": "shopping-tools-v2",
+    "upstream_commit": "4ed73020e1d7d07eb93e7375a4606b0901d3cded"
+  }
+}

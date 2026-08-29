@@ -11,9 +11,21 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
+
+from shopping_grpo.training.sft.run_manifest import (  # noqa: E402
+    FROZEN_MODEL_REVISION,
+    validate_model_revision,
+)
+
 STAGES = ("a", "b", "c")
+
+
+def _path_arg(value) -> str:
+    """Use shell-neutral separators in generated commands on every host."""
+    return value.as_posix() if isinstance(value, Path) else str(value)
 
 
 def build_stage_commands(
@@ -31,7 +43,9 @@ def build_stage_commands(
     qlora=False,
     liger_kernel=False,
     resume_from_checkpoint=None,
+    revision=FROZEN_MODEL_REVISION,
 ):
+    validate_model_revision(revision)
     start = STAGES.index(start_stage)
     stop = STAGES.index(stop_after_stage)
     if stop < start:
@@ -44,23 +58,25 @@ def build_stage_commands(
         model = (
             base_model
             if stage == "a"
-            else str(Path(output_root) / f"stage-{STAGES[STAGES.index(stage) - 1]}" / "merged")
+            else _path_arg(Path(output_root) / f"stage-{STAGES[STAGES.index(stage) - 1]}" / "merged")
         )
         train = [
             str(python),
             str(ROOT / "scripts/train_lora_sft.py"),
             "--model",
-            str(model),
+            _path_arg(model),
+            "--revision",
+            revision,
             "--train",
-            str(source),
+            _path_arg(source),
             "--validation",
             str(source),
             "--curriculum-manifest",
-            str(manifest_path),
+            _path_arg(manifest_path),
             "--curriculum-stage",
             stage,
             "--output",
-            str(stage_root / "adapter"),
+            _path_arg(stage_root / "adapter"),
             "--epochs",
             str(stage_config["epochs"]),
             "--learning-rate",
@@ -87,11 +103,13 @@ def build_stage_commands(
             str(python),
             str(ROOT / "scripts/merge_lora_adapter.py"),
             "--base-model",
-            str(model),
+            _path_arg(model),
+            "--revision",
+            revision,
             "--adapter",
-            str(stage_root / "adapter"),
+            _path_arg(stage_root / "adapter"),
             "--output",
-            str(stage_root / "merged"),
+            _path_arg(stage_root / "merged"),
             "--bf16",
         ]
         commands.append({"stage": stage, "train": train, "merge": merge})
@@ -113,6 +131,11 @@ def parse_args():
     parser.add_argument("--start-stage", choices=STAGES, default="a")
     parser.add_argument("--stop-after-stage", choices=STAGES, default="c")
     parser.add_argument("--resume-from-checkpoint", type=Path)
+    parser.add_argument(
+        "--revision",
+        default=FROZEN_MODEL_REVISION,
+        help="基座模型冻结 revision；本项目必须使用固定提交",
+    )
     parser.add_argument("--swanlab", action="store_true")
     parser.add_argument("--swanlab-project", default="shopping-grpo-sft-curriculum")
     parser.add_argument("--qlora", action="store_true")
@@ -123,6 +146,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+    try:
+        validate_model_revision(args.revision)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     if manifest.get("schema_version") != "shopping-sft-curriculum-v1":
         raise SystemExit("不支持的课程清单 schema_version")
@@ -144,6 +171,7 @@ def main():
             qlora=args.qlora,
             liger_kernel=args.liger_kernel,
             resume_from_checkpoint=args.resume_from_checkpoint,
+            revision=args.revision,
         )
     except (KeyError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc

@@ -4,6 +4,10 @@
 转换成环境 ``search[...]``/``click[...]``/``finish[...]`` 动作的映射。
 """
 
+import hashlib
+import json
+from pathlib import Path
+
 CLICK_TOOL_ACTIONS = {
     "open_product": ("asin", None),
     "select_option": ("value", None),
@@ -103,3 +107,47 @@ SHOP_TOOL_SCHEMAS = [
     _FINISH_WITHOUT_PURCHASE_SCHEMA,
     _INTERACTION_TOOL_SCHEMAS[-1],
 ]
+
+
+def canonical_tool_schema_sha256(schemas) -> str:
+    """Hash only the OpenAI schemas, using the repository's canonical JSON form.
+
+    ``configs/tools.json`` is the runtime source of truth.  Keeping this small
+    helper next to ``SHOP_TOOL_SCHEMAS`` means builders, launchers, and runtime
+    checks cannot silently choose different serialization/hash rules.
+    """
+    payload = json.dumps(
+        list(schemas), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def load_runtime_tool_schemas(config_path=None):
+    """Load the canonical schemas from ``configs/tools.json``."""
+    if config_path is None:
+        config_path = Path(__file__).resolve().parents[3] / "configs" / "tools.json"
+    path = Path(config_path)
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read canonical tool schema {path}: {exc}") from exc
+    tools = document.get("tools")
+    if not isinstance(tools, list) or not tools:
+        raise ValueError(f"canonical tool schema {path} has no tools list")
+    schemas = [item.get("tool_schema") for item in tools if isinstance(item, dict)]
+    if len(schemas) != len(tools) or any(not isinstance(schema, dict) for schema in schemas):
+        raise ValueError(f"canonical tool schema {path} contains malformed tool entries")
+    return schemas
+
+
+def validate_runtime_tool_schema(config_path=None) -> str:
+    """Require runtime JSON and Python schemas to be byte-equivalent by contract."""
+    runtime = load_runtime_tool_schemas(config_path)
+    runtime_hash = canonical_tool_schema_sha256(runtime)
+    python_hash = canonical_tool_schema_sha256(SHOP_TOOL_SCHEMAS)
+    if runtime_hash != python_hash:
+        raise ValueError(
+            "canonical tool schema drift: configs/tools.json hash "
+            f"{runtime_hash} != Python SHOP_TOOL_SCHEMAS hash {python_hash}"
+        )
+    return runtime_hash

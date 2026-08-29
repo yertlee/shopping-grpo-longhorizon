@@ -23,6 +23,12 @@ EXPECTED_VERSIONS = {
 }
 EXPECTED_TRANSFORMERS_REVISION = "7ea2320c76117e6742364808a666ef6f2fb40a67"
 PATCH_MARKER = "SHOPPING_GRPO_DYNAMIC_SAMPLING_PATCH_V3"
+# patched SHA 口径必须与 scripts/apply_verl_dynamic_sampling_patch.py 完全一致：
+# runtime gate 不能只看 marker，还要比对打补丁后文件的最终 SHA256（audit item 5）。
+try:
+    from scripts.apply_verl_dynamic_sampling_patch import EXPECTED_PATCHED_SHA256, sha256
+except ImportError:  # 以 `python scripts/check_grpo_runtime.py` 直接执行时
+    from apply_verl_dynamic_sampling_patch import EXPECTED_PATCHED_SHA256, sha256  # type: ignore[no-redef]
 MAX_SAFE_RESPONSE_LENGTH = 20480
 MAX_SAFE_SEQUENCE_LENGTH = 24576
 CURRENT_RUNTIME_FILES = {
@@ -97,6 +103,12 @@ def validate_environment_contract():
         )
     )
     tools = json.loads(tools_path.read_text(encoding="utf-8")).get("tools", [])
+    try:
+        from shopping_grpo.environment.tools import validate_runtime_tool_schema
+
+        tool_schema_hash = validate_runtime_tool_schema(tools_path)
+    except (ImportError, OSError, ValueError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"invalid canonical tool schema: {exc}") from exc
     tool_names = {
         item.get("tool_schema", {}).get("function", {}).get("name")
         for item in tools
@@ -120,6 +132,7 @@ def validate_environment_contract():
                 "search_version": manifest["search"]["version"],
                 "lease_contract": manifest.get("lease_contract"),
                 "runtime_file_count": len(manifest.get("runtime_files_sha256") or {}),
+                "tool_schema_sha256": tool_schema_hash,
             },
             sort_keys=True,
         )
@@ -161,6 +174,51 @@ def validate_transformers_revision():
     print(f"pinned Transformers revision preflight passed: {revision}")
 
 
+def validate_actor_ref_model_contract(config):
+    """冻结 ref 与 actor 同源（audit item 4）：
+
+    - veRL 0.8 的 ``actor_rollout_ref.ref`` 没有（也不允许有）独立 ``model`` 覆盖；
+      reference 结构上就是 ``actor_rollout_ref.model.path`` 指向的同一个 M2 merged
+      checkpoint，而不是 Base；
+    - composed 后的 actor model path 必须等于 launcher 注入的 ``GRPO_MODEL_PATH``，
+      证明配置没有被改指其他 checkpoint。
+    """
+    actor_rollout_ref = config.get("actor_rollout_ref")
+    if actor_rollout_ref is None:
+        raise SystemExit("composed GRPO config is missing actor_rollout_ref")
+    ref_node = actor_rollout_ref.get("ref")
+    if ref_node is not None and "model" in ref_node:
+        raise SystemExit(
+            "actor_rollout_ref.ref must not override the actor model path; the frozen GRPO "
+            "reference is the same M2 merged checkpoint as the actor (never Base)"
+        )
+    env_model_path = os.environ.get("GRPO_MODEL_PATH")
+    if env_model_path:
+        model_node = actor_rollout_ref.get("model")
+        try:
+            composed_path = model_node.get("path") if model_node is not None else None
+        except Exception as exc:  # OmegaConf 未解析插值等配置错误
+            raise SystemExit(
+                f"cannot resolve actor_rollout_ref.model.path from the composed config: {exc}"
+            ) from exc
+        if str(composed_path) != str(env_model_path):
+            raise SystemExit(
+                "composed actor model path does not match GRPO_MODEL_PATH: "
+                f"config={composed_path!r}, env={env_model_path!r}"
+            )
+    print(
+        "GRPO actor/reference model contract preflight passed: "
+        + json.dumps(
+            {
+                "ref_model_override": False,
+                "actor_model_path": env_model_path or "(GRPO_MODEL_PATH unset)",
+                "ref_same_source_as_actor": True,
+            },
+            sort_keys=True,
+        )
+    )
+
+
 def validate_dynamic_sampling(config, verl_source: Path, installed):
     dynamic_config = config.get("shopping_dynamic_sampling", {})
     if not bool(dynamic_config.get("enable", False)):
@@ -177,6 +235,14 @@ def validate_dynamic_sampling(config, verl_source: Path, installed):
         raise SystemExit(
             "shopping dynamic sampling is enabled but the pinned veRL patch marker is missing; "
             "run scripts/apply_verl_dynamic_sampling_patch.py first"
+        )
+    # marker 之外还必须比对最终 patched SHA256；任何被改动过的文件都拒绝启动。
+    target_hash = sha256(ray_trainer)
+    if target_hash != EXPECTED_PATCHED_SHA256:
+        raise SystemExit(
+            "patched ray_trainer.py SHA256 mismatch: expected "
+            f"{EXPECTED_PATCHED_SHA256}, got {target_hash}; "
+            "re-run scripts/apply_verl_dynamic_sampling_patch.py before launching"
         )
 
     try:
@@ -239,6 +305,7 @@ def validate_dynamic_sampling(config, verl_source: Path, installed):
                 "reward_tolerance": reward_tolerance,
                 "ray_trainer": str(ray_trainer),
                 "marker": PATCH_MARKER,
+                "patched_sha256": target_hash,
             },
             sort_keys=True,
         )
@@ -380,6 +447,7 @@ def validate_training_memory_budget(config):
 def main():
     config = compose_runtime_config(sys.argv[1:])
     validate_environment_contract()
+    validate_actor_ref_model_contract(config)
     required_paths = {
         "GRPO_TRAIN_FILE": os.environ.get("GRPO_TRAIN_FILE"),
         "GRPO_VAL_FILE": os.environ.get("GRPO_VAL_FILE"),

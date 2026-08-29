@@ -9,9 +9,12 @@ import statistics
 from collections import Counter
 from pathlib import Path
 
+from shopping_grpo.evaluation.comparison import compare_paired_statistics
+
 
 ROOT = Path(__file__).resolve().parents[1]
 HISTOGRAM_EDGES = [-1.0, -0.8, -0.6, -0.4, -0.2, 0.0, 0.2, 0.4, 0.6, 0.8, 1.000001]
+PAIRED_STATISTICS_SEED = 20260829
 MODEL_ANALYSIS = {
     "qwen3.7-max": {
         "portrait": "整体最稳，搜索召回通常够用，找到后也敢下单；代价是偶尔太果断，买了第一个看着差不多的候选。",
@@ -141,7 +144,87 @@ def _model_data(run_dir: Path) -> dict:
     }
 
 
-def build_comparison_data(evaluation_dir: Path) -> dict:
+def build_paired_statistics(
+    run_dirs: list[Path],
+    *,
+    families: list[tuple[str, str, str]] | None = None,
+    bootstrap_iterations: int = 2000,
+    bootstrap_seed: int = PAIRED_STATISTICS_SEED,
+    confidence_level: float = 0.95,
+) -> dict:
+    """把 ``compare_paired_statistics`` 接进 comparison report 数据。
+
+    只统计带新 schema ``evaluations.jsonl`` 的 run；缺失/duplicate/unexpected
+    task ID 会由 compare_paired_statistics 直接抛错。缺两个可用 run 时显式记录
+    skipped 原因，不静默省略。绝不生成 composite score。
+    """
+
+    runs = {}
+    for run_dir in run_dirs:
+        evaluations_path = run_dir / "evaluations.jsonl"
+        if not evaluations_path.is_file():
+            continue
+        rows = _load_jsonl(evaluations_path)
+        if rows:
+            runs[run_dir.name] = rows
+    if len(runs) < 2:
+        missing = sorted(
+            {run_dir.name for run_dir in run_dirs} - set(runs)
+        )
+        return {
+            "schema_version": "shopping-paired-statistics-report-v1",
+            "status": "skipped",
+            "reason": (
+                "paired statistics need at least two runs with a non-empty "
+                "new-schema evaluations.jsonl"
+            ),
+            "runs_without_evaluations": missing,
+        }
+    labels = sorted(runs)
+    if families:
+        family_map = {label: (target, source) for label, target, source in families}
+        for label, (target, source) in family_map.items():
+            unknown = {target, source} - set(runs)
+            if unknown:
+                raise ValueError(
+                    f"family {label!r} references unknown runs {sorted(unknown)}"
+                )
+    else:
+        # 缺省族：按 label 排序后的相邻两两比较（如 m1_vs_m0、m2_vs_m1）。
+        family_map = {
+            f"{labels[index + 1]}_vs_{labels[index]}": (
+                labels[index + 1],
+                labels[index],
+            )
+            for index in range(len(labels) - 1)
+        }
+    expected_task_ids = sorted(
+        {int(row["task_id"]) for rows in runs.values() for row in rows}
+    )
+    report = compare_paired_statistics(
+        expected_task_ids=expected_task_ids,
+        runs=runs,
+        families=family_map,
+        bootstrap_iterations=bootstrap_iterations,
+        bootstrap_seed=bootstrap_seed,
+        confidence_level=confidence_level,
+    )
+    return {
+        "schema_version": "shopping-paired-statistics-report-v1",
+        "status": "computed",
+        "runs": labels,
+        "report": report,
+    }
+
+
+def build_comparison_data(
+    evaluation_dir: Path,
+    *,
+    families: list[tuple[str, str, str]] | None = None,
+    bootstrap_iterations: int = 2000,
+    bootstrap_seed: int = PAIRED_STATISTICS_SEED,
+    confidence_level: float = 0.95,
+) -> dict:
     run_dirs = sorted(
         path
         for path in evaluation_dir.iterdir()
@@ -159,8 +242,16 @@ def build_comparison_data(evaluation_dir: Path) -> dict:
         sum(task_id in set(model["success_ids"]) for model in models) for task_id in all_task_ids
     )
     best = max(models, key=lambda model: model["success_rate"])
+    paired_statistics = build_paired_statistics(
+        run_dirs,
+        families=families,
+        bootstrap_iterations=bootstrap_iterations,
+        bootstrap_seed=bootstrap_seed,
+        confidence_level=confidence_level,
+    )
     return {
         "models": models,
+        "paired_statistics": paired_statistics,
         "outcome_order": [
             "gold_purchase",
             "valid_alternative_purchase",
@@ -218,6 +309,7 @@ table{border-collapse:collapse;width:100%;min-width:900px}th,td{padding:10px;bor
 <section class="card wide"><h2>描述性统计</h2><p class="muted">Reward 统计包含全部 200 条；未形成可验证终局的轨迹按其记录值（通常为 0）计入。</p><div id="reward-reading"></div><table><thead><tr><th>模型</th><th>严格成功</th><th>购买成功率</th><th>Reward 有效率</th><th>均值</th><th>中位数</th><th>标准差</th><th>最小</th><th>P25</th><th>P75</th><th>最大</th><th>平均步数</th></tr></thead><tbody id="stats"></tbody></table></section>
 <section class="card wide"><h2>Reward 分布</h2><p class="muted">每一小柱是一个 0.2 宽区间；紫柱越高，落在该 Reward 区间的任务越多。</p><div id="histograms"></div><div class="hist-labels" id="hist-labels"></div></section>
 <section class="card wide"><h2>终局类型分布</h2><div class="legend" id="legend"></div><div id="outcomes"></div></section>
+<section class="card wide"><h2>配对统计（exact McNemar + Holm）</h2><p class="muted">二元端点做 exact McNemar 并按族 Holm 校正；次要连续端点给 paired bootstrap 95% CI。缺失/重复/多余 task 直接拒绝，不生成 composite score。</p><div id="paired-stats"></div></section>
 <section class="card wide"><h2>核心结论：强模型强在哪</h2><div id="strengths"></div></section>
 <section class="card wide"><h2>各模型主要 Bad Case</h2><div class="notes" id="model-notes"></div></section>
 <section class="card wide"><h2>跨模型共性</h2><div id="common-notes"></div><h3>所有模型都没做对的任务（<span id="all-failed-count"></span>）</h3><div class="task-ids" id="all-failed"></div><h3 style="margin-top:16px">所有模型都做对的任务（<span id="all-succeeded-count"></span>）</h3><div class="task-ids" id="all-succeeded"></div></section>
@@ -246,6 +338,11 @@ document.querySelector('#model-notes').innerHTML=sorted.map(m=>{const a=D.analys
 document.querySelector('#common-notes').innerHTML=`<p><b>第一类是“看标题就退”。</b>候选标题不够像时，模型常常打开后立即返回，没有继续看完整属性、规格轴和变体价；这在 Qwen Plus（64 个 bad case）、DeepSeek Pro（29 个）和 DeepSeek Flash（28 个）里尤其明显。</p><p><b>第二类是“找到后不收口”。</b>正确候选已经出现，模型仍换同义搜索词、重复打开商品或来回切规格。强模型 Qwen Max 只有 4 个 repeat_loop，Qwen Plus 有 70 个，差距主要就在这里。</p><p><b>第三类是“规格轴没管住”。</b>型号、颜色、尺码、容量、数量经常只选一部分，或者点过但最终购买状态没保留。预算也应按最终变体价核对，而不是拿列表价格凭感觉。</p><p><b>第四类是“页面状态没跟上”。</b>模型拿旧页面的 ASIN/按钮继续点，或给无参工具乱传参数。DeepSeek Pro 的 29 条 invalid_action_limit 是最集中的系统性问题。</p><p>${D.all_failed_task_ids.length} 道题六个模型全败，说明这部分通常有大量近似品，必须靠详情或精确规格区分；${D.all_succeeded_task_ids.length} 道题六个模型全对，说明基础搜索和明显匹配项并不是主要瓶颈。</p>`;
 document.querySelector('#data-notes').innerHTML=`<p>raw bad 数不能全当成模型真实错误。逐轨迹检查发现几类疑似标签/比较器问题：</p><ul><li><b>需求与 gold 冲突：</b>5703 用户明确要 7 号机针，gold 却要 8 号；21785 用户要 2XL，gold 却是 XL；5510 用户要 L 码，gold 却含 S-2只装。</li><li><b>需求没写、gold 却强制：</b>4786 没写尺码却要求 XL女175；3368 只要求高度 15cm 以下，9cm 合理但 gold 强制 12cm。</li><li><b>字符归一化：</b>11168、5904、2352、12860 存在 ➕、爱心、大小写等字符串看起来等价却匹配失败。</li><li><b>口语预算被当硬上限：</b>“60 元出头”买 62、“40 左右”买 45、“170 上下”买 171 都会被判失败。报告保留官方严格成功率，但这些案例不宜直接归因于模型推理。</li></ul>`;
 document.querySelector('#all-failed-count').textContent=D.all_failed_task_ids.length;document.querySelector('#all-failed').textContent=D.all_failed_task_ids.join(', ');document.querySelector('#all-succeeded-count').textContent=D.all_succeeded_task_ids.length;document.querySelector('#all-succeeded').textContent=D.all_succeeded_task_ids.join(', ');
+(function(){const target=document.querySelector('#paired-stats');const paired=D.paired_statistics||{};if(paired.status!=='computed'){target.innerHTML=`<p class="muted">未计算配对统计：${esc(paired.reason||'无可用数据')}</p>`;return;}
+const fams=(paired.report||{}).families||{};
+const binaryRows=Object.entries(fams).flatMap(([name,f])=>Object.entries(f.binary_endpoints||{}).map(([ep,v])=>`<tr><td>${esc(name)}</td><td>${esc(ep)}</td><td>${v.b}</td><td>${v.c}</td><td>${Number(v.p_value).toFixed(4)}</td><td>${Number(v.holm_adjusted_p_value==null?1:v.holm_adjusted_p_value).toFixed(4)}</td></tr>`));
+const ciRows=Object.entries(fams).flatMap(([name,f])=>Object.entries(f.continuous_endpoints||{}).filter(([,v])=>v.bootstrap_ci&&v.bootstrap_ci.paired_tasks>0).map(([ep,v])=>`<tr><td>${esc(name)}</td><td>${esc(ep)}</td><td>${n(v.mean_delta_target_minus_source||0)}</td><td>${n(v.bootstrap_ci.lower)}</td><td>${n(v.bootstrap_ci.upper)}</td></tr>`));
+target.innerHTML=`<h3>二元端点（b = source 成功而 target 失败；c = source 失败而 target 成功）</h3><table><thead><tr><th>族</th><th>端点</th><th>b</th><th>c</th><th>p (exact McNemar)</th><th>p (Holm)</th></tr></thead><tbody>${binaryRows.join('')}</tbody></table>`+(ciRows.length?`<h3 style="margin-top:14px">次要连续端点（paired bootstrap 95% CI）</h3><table><thead><tr><th>族</th><th>端点</th><th>均值差</th><th>CI 下界</th><th>CI 上界</th></tr></thead><tbody>${ciRows.join('')}</tbody></table>`:'');})();
 </script></body></html>'''
 
 
@@ -255,13 +352,44 @@ def parse_args(argv=None):
         "--evaluation-dir", type=Path, default=ROOT / "outputs" / "evaluation"
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--family",
+        action="append",
+        default=None,
+        metavar="LABEL=TARGET:SOURCE",
+        help="显式配对比较族（如 m2_vs_m1=m2:m1）；缺省按 label 排序后相邻两两比较",
+    )
+    parser.add_argument("--bootstrap-iterations", type=int, default=2000)
+    parser.add_argument("--bootstrap-seed", type=int, default=PAIRED_STATISTICS_SEED)
     return parser.parse_args(argv)
+
+
+def _parse_families(raw):
+    if not raw:
+        return None
+    families = []
+    for item in raw:
+        label, _, pair = item.partition("=")
+        target, separator, source = pair.partition(":")
+        if not label or separator != ":" or not target or not source:
+            raise SystemExit(f"--family 格式应为 LABEL=TARGET:SOURCE，收到 {item!r}")
+        families.append((label.strip(), target.strip(), source.strip()))
+    return families
 
 
 def main(argv=None):
     args = parse_args(argv)
     output = args.output or args.evaluation_dir / "comparison-report.html"
-    data = json.dumps(build_comparison_data(args.evaluation_dir), ensure_ascii=False, separators=(",", ":"))
+    data = json.dumps(
+        build_comparison_data(
+            args.evaluation_dir,
+            families=_parse_families(args.family),
+            bootstrap_iterations=args.bootstrap_iterations,
+            bootstrap_seed=args.bootstrap_seed,
+        ),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     output.write_text(HTML.replace("__REPORT_DATA__", data.replace("</", "<\\/")), encoding="utf-8")
     print(output)
 

@@ -1,4 +1,15 @@
 # Shopping Agent GRPO configuration.
+#
+# 冻结合同（HANDOFF_TRAINING_IMPLEMENTATION_GAPS §3 / §6，只允许注释，不做语义修改）：
+# - GRPO_MODEL_PATH 必须指向已验收的 M2 merged checkpoint（Process-clean SFT 合并产物，
+#   目录内 merge_manifest.json 的 verification.passed 必须为 true；scripts/train_grpo.py
+#   启动前 preflight 会强制校验，禁止 adapter 目录或原始 Base）。
+# - ref 段显式冻结与 actor 同源：veRL 0.8 的 actor_rollout_ref.ref 配置没有独立的
+#   model 节点（ref 直接复用 actor_rollout_ref.model.path，即 ${oc.env:GRPO_MODEL_PATH}
+#   指向的同一个 M2 merged checkpoint，绝不是 Base）。禁止在 ref 下新增 model.path 等
+#   新键：Hydra struct compose 会拒绝未知键，scripts/check_grpo_runtime.py 的
+#   validate_actor_ref_model_contract 也会拒绝任何 ref.model 覆盖；
+#   scripts/train_grpo.py preflight 断言 actor/ref resolved 路径逐字节一致。
 hydra:
   searchpath:
     - pkg://verl/trainer/config
@@ -24,8 +35,8 @@ actor_rollout_ref:
     trust_remote_code: true
     enable_gradient_checkpointing: true
     use_remove_padding: false
-    lora_rank: 16
-    lora_alpha: 32
+    lora_rank: 16        # 冻结：GRPO LoRA r=16
+    lora_alpha: 32       # 冻结：GRPO LoRA alpha=32
     target_modules: all-linear
     lora:
       merge: true
@@ -46,7 +57,7 @@ actor_rollout_ref:
     kl_loss_coef: 0.0
     kl_loss_type: low_var_kl
     optim:
-      lr: 1.0e-6
+      lr: 1.0e-6         # 冻结：GRPO 学习率 1e-6
       lr_warmup_steps_ratio: 0.03
     fsdp_config:
       optimizer_offload: true
@@ -87,6 +98,8 @@ actor_rollout_ref:
       top_p: 1.0
       do_sample: false
   ref:
+    # 冻结 reference：与 actor 完全同源（同一个 M2 merged checkpoint），见文件头说明。
+    # 这里只允许设置 ref 的计算参数；任何 model 路径覆盖都会被 runtime preflight 拒绝。
     log_prob_micro_batch_size_per_gpu: 1
     log_prob_max_token_len_per_gpu: 24576
     log_prob_use_dynamic_bsz: false
@@ -103,6 +116,7 @@ algorithm:
     rollout_rs: null
     loss_type: ppo_clip
 
+# bounded dynamic sampling：补采最多 3 批，连续跳过更新上限 10；数值冻结。
 shopping_dynamic_sampling:
   enable: true
   metric: seq_reward
@@ -120,7 +134,7 @@ ray_kwargs:
 
 trainer:
   total_epochs: 50
-  total_training_steps: 500
+  total_training_steps: 500  # 上限 500；100-step Pilot Gate 通过后才允许继续
   save_freq: 50
   test_freq: 50
   val_before_train: true
