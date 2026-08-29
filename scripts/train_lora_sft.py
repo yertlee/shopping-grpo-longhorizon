@@ -2,6 +2,7 @@
 """对验收后的 Shopping tool-calling 数据进行最小 LoRA SFT。"""
 
 import argparse
+import inspect
 import json
 import sys
 import time as _time
@@ -423,6 +424,57 @@ def _swanlab_config(args):
     return "swanlab", run_name
 
 
+def _training_arguments_kwargs(
+    training_arguments_class,
+    *,
+    args,
+    dtype_name,
+    validation_examples,
+    report_to,
+    run_name,
+):
+    """Build ``TrainingArguments`` kwargs across Transformers runtime contracts.
+
+    Transformers 5.15.1 accepts the logical warmup fraction through
+    ``warmup_steps`` (a value below one is interpreted as a ratio), while some
+    older releases expose ``warmup_ratio`` instead. Select exactly one field
+    from the constructor signature so the manifest can keep recording the
+    stable logical ``warmup_ratio`` recipe without passing both aliases.
+    """
+    kwargs = {
+        "output_dir": str(args.output),
+        "num_train_epochs": args.epochs,
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "per_device_eval_batch_size": args.per_device_eval_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "learning_rate": args.learning_rate,
+        "bf16": dtype_name == "bf16",
+        "fp16": dtype_name == "fp16",
+        "gradient_checkpointing": args.gradient_checkpointing,
+        "use_liger_kernel": args.liger_kernel,
+        "logging_steps": args.logging_steps,
+        "save_strategy": "epoch",
+        "save_total_limit": args.save_total_limit,
+        "eval_strategy": "epoch" if validation_examples else "no",
+        "report_to": report_to,
+        "run_name": run_name,
+        "max_steps": args.max_steps if args.max_steps > 0 else -1,
+        "remove_unused_columns": False,
+        "seed": args.seed,
+    }
+    parameters = inspect.signature(training_arguments_class).parameters
+    if "warmup_steps" in parameters:
+        kwargs["warmup_steps"] = args.warmup_ratio
+    elif "warmup_ratio" in parameters:
+        kwargs["warmup_ratio"] = args.warmup_ratio
+    else:
+        raise TypeError(
+            "TrainingArguments exposes neither warmup_steps nor warmup_ratio; "
+            "cannot preserve the requested warmup ratio"
+        )
+    return kwargs
+
+
 def _loss_only_eval_trainer_class(trainer_base, enable_skip_logits):
     """构造只在 loss-only 验证时显式跳过完整词表 logits 的 Trainer。
 
@@ -790,26 +842,14 @@ def main():
         )
         print(f"[SwanLab] project={args.swanlab_project} run={run_name}")
     training_args = TrainingArguments(
-        output_dir=str(args.output),
-        num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=args.per_device_eval_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        learning_rate=args.learning_rate,
-        warmup_ratio=args.warmup_ratio,
-        bf16=dtype_name == "bf16",
-        fp16=dtype_name == "fp16",
-        gradient_checkpointing=args.gradient_checkpointing,
-        use_liger_kernel=args.liger_kernel,
-        logging_steps=args.logging_steps,
-        save_strategy="epoch",
-        save_total_limit=args.save_total_limit,
-        eval_strategy="epoch" if validation_examples else "no",
-        report_to=report_to,
-        run_name=run_name,
-        max_steps=args.max_steps if args.max_steps > 0 else -1,
-        remove_unused_columns=False,
-        seed=args.seed,
+        **_training_arguments_kwargs(
+            TrainingArguments,
+            args=args,
+            dtype_name=dtype_name,
+            validation_examples=validation_examples,
+            report_to=report_to,
+            run_name=run_name,
+        )
     )
     trainer_class = _loss_only_eval_trainer_class(
         Trainer,

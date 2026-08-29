@@ -1,10 +1,12 @@
 """验证 LoRA SFT 入口的关键默认值。"""
 
+import io
 import os
 import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +18,7 @@ from scripts.train_lora_sft import (
     _prepare_model_for_training,
     _resolve_dtype,
     _swanlab_config,
+    _training_arguments_kwargs,
     _curriculum_task_ids,
     parse_args,
 )
@@ -87,7 +90,122 @@ class _FakeTrainer:
         return model, inputs, prediction_loss_only, ignore_keys
 
 
+class _WarmupStepsOnlyTrainingArguments:
+    def __init__(
+        self,
+        output_dir,
+        num_train_epochs,
+        per_device_train_batch_size,
+        per_device_eval_batch_size,
+        gradient_accumulation_steps,
+        learning_rate,
+        warmup_steps,
+        bf16,
+        fp16,
+        gradient_checkpointing,
+        use_liger_kernel,
+        logging_steps,
+        save_strategy,
+        save_total_limit,
+        eval_strategy,
+        report_to,
+        run_name,
+        max_steps,
+        remove_unused_columns,
+        seed,
+    ):
+        del (
+            output_dir,
+            num_train_epochs,
+            per_device_train_batch_size,
+            per_device_eval_batch_size,
+            gradient_accumulation_steps,
+            learning_rate,
+            warmup_steps,
+            bf16,
+            fp16,
+            gradient_checkpointing,
+            use_liger_kernel,
+            logging_steps,
+            save_strategy,
+            save_total_limit,
+            eval_strategy,
+            report_to,
+            run_name,
+            max_steps,
+            remove_unused_columns,
+            seed,
+        )
+
+
 class TrainLoraSftCliTest(unittest.TestCase):
+    def test_training_arguments_uses_warmup_steps_contract_without_kwarg_drift(self):
+        args = type(
+            "Args",
+            (),
+            {
+                "output": Path("outputs/adapter"),
+                "epochs": 3,
+                "per_device_train_batch_size": 1,
+                "per_device_eval_batch_size": 1,
+                "gradient_accumulation_steps": 8,
+                "learning_rate": 1e-4,
+                "warmup_ratio": 0.03,
+                "dtype": "bf16",
+                "gradient_checkpointing": True,
+                "liger_kernel": True,
+                "logging_steps": 5,
+                "save_total_limit": 3,
+                "max_steps": 2,
+                "seed": 42,
+            },
+        )()
+
+        kwargs = _training_arguments_kwargs(
+            _WarmupStepsOnlyTrainingArguments,
+            args=args,
+            dtype_name="bf16",
+            validation_examples=[object()],
+            report_to="none",
+            run_name=None,
+        )
+
+        self.assertEqual(kwargs["warmup_steps"], 0.03)
+        self.assertNotIn("warmup_ratio", kwargs)
+        self.assertEqual(
+            set(kwargs),
+            {
+                "output_dir",
+                "num_train_epochs",
+                "per_device_train_batch_size",
+                "per_device_eval_batch_size",
+                "gradient_accumulation_steps",
+                "learning_rate",
+                "warmup_steps",
+                "bf16",
+                "fp16",
+                "gradient_checkpointing",
+                "use_liger_kernel",
+                "logging_steps",
+                "save_strategy",
+                "save_total_limit",
+                "eval_strategy",
+                "report_to",
+                "run_name",
+                "max_steps",
+                "remove_unused_columns",
+                "seed",
+            },
+        )
+
+    def test_cli_help_keeps_warmup_ratio_option(self):
+        with patch.object(sys, "argv", ["train_lora_sft.py", "--help"]):
+            help_output = io.StringIO()
+            with redirect_stdout(help_output), self.assertRaises(SystemExit) as raised:
+                parse_args()
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("--warmup-ratio", help_output.getvalue())
+
     def test_curriculum_manifest_expands_cumulative_stage_ids(self):
         manifest = {
             "stages": {"b": {"buckets": ["foundation", "constraints"]}},
