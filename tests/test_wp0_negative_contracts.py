@@ -12,6 +12,21 @@ from shopping_grpo.training.sft.reload_check import ForwardResult
 from shopping_grpo.training.sft.run_manifest import FROZEN_MODEL_REVISION, compute_run_id, hash_weight_files
 
 
+class _SemanticTokenizer:
+    vocab_size = 2
+    all_special_tokens = ["<pad>"]
+    all_special_ids = [0]
+    special_tokens_map = {"pad": "<pad>"}
+    chat_template = "{{ messages }}"
+    model_input_names = ["input_ids"]
+
+    def get_vocab(self):
+        return {"<pad>": 0, "x": 1}
+
+    def get_added_vocab(self):
+        return {}
+
+
 def _loaders(calls):
     def load_model(path, dtype="bf16", revision=None):
         calls.append(("model", str(path), revision))
@@ -19,7 +34,7 @@ def _loaders(calls):
 
     def load_tokenizer(path, revision=None):
         calls.append(("tokenizer", str(path), revision))
-        return {"path": str(path)}
+        return _SemanticTokenizer()
 
     return {
         "load_model": load_model,

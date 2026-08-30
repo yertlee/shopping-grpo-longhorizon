@@ -26,6 +26,7 @@ from shopping_grpo.training.sft.reload_check import (  # noqa: E402
     check_tokenizer_identity,
     default_reload_loaders,
     resolve_device,
+    tokenizer_artifact_hashes,
 )
 from shopping_grpo.training.sft.run_manifest import (  # noqa: E402
     FROZEN_MODEL_REVISION,
@@ -255,12 +256,6 @@ def verify_merged_dir(
         checks.append(check_dtype_config(merged_dir, manifest))
         checks.append(check_manifest_hashes(merged_dir, manifest))
         checks.append(check_input_hashes(manifest))
-        # tokenizer 字节级身份：merged 目录的 tokenizer 文件必须与基座一致。
-        # revision 透传挡住 hub 漂移；这一步挡住"合并后 tokenizer 被换过"。
-        checks.append(
-            check_tokenizer_identity(merged_dir, manifest.get("source", {}).get("base_model", ""))
-        )
-
         try:
             model = _call_loader(
                 loaders["load_model"],
@@ -272,6 +267,21 @@ def verify_merged_dir(
                 loaders["load_tokenizer"],
                 merged_dir,
                 revision=manifest["merge"].get("base_revision") or FROZEN_MODEL_REVISION,
+            )
+            base_tokenizer = _call_loader(
+                loaders["load_tokenizer"],
+                manifest["source"]["base_model"],
+                revision=manifest["merge"].get("base_revision") or FROZEN_MODEL_REVISION,
+            )
+            # Compare resolved semantics.  File hashes remain audit evidence;
+            # save_pretrained normalization and Hub cache files are not identity.
+            checks.append(
+                check_tokenizer_identity(
+                    merged_dir,
+                    manifest.get("source", {}).get("base_model", ""),
+                    output_tokenizer=tokenizer,
+                    base_tokenizer=base_tokenizer,
+                )
             )
             checks.append({"name": "bf16_reload", "passed": True, "detail": {"dtype": manifest["merge"]["dtype"]}})
             if skip_forward:
@@ -305,6 +315,16 @@ def verify_merged_dir(
                     "detail": {"error": f"{exc.__class__.__name__}: {exc}"},
                 }
             )
+            checks.append(
+                {
+                    "name": "tokenizer_identity_matches_base",
+                    "passed": False,
+                    "detail": {
+                        "reason": f"tokenizer/base reload 失败：{exc.__class__.__name__}: {exc}",
+                        "output_artifact_sha256": tokenizer_artifact_hashes(merged_dir),
+                    },
+                }
+            )
 
     all_passed = all(check["passed"] for check in checks)
     if manifest is not None:
@@ -312,6 +332,7 @@ def verify_merged_dir(
             "passed": all_passed,
             "device": resolve_device(device_request),
             "checks": checks,
+            "preprocessing_output_files_sha256": tokenizer_artifact_hashes(merged_dir),
             "verified_at_epoch_s": int(time.time()),
             "verifier_code_sha256": sha256_file(Path(__file__).resolve()),
             "manifest_output_digest": sha256_bytes(canonical_json_bytes(manifest.get("output", {}))),

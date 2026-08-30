@@ -12,16 +12,61 @@ from unittest.mock import patch
 from scripts.merge_lora_adapter import build_merge_manifest, choose_model_class
 from scripts.verify_merged_checkpoint import verify_merged_dir
 from scripts.verify_sft_adapter import verify_run_dir
-from shopping_grpo.training.sft.reload_check import ForwardResult
+from shopping_grpo.training.sft.reload_check import (
+    ForwardResult,
+    check_tokenizer_identity,
+    default_reload_loaders,
+)
 from shopping_grpo.training.sft.run_manifest import sha256_bytes
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _fake_loaders(*, forward_ok=True, trainable=(2048, 1_000_000), adapter_keys=None):
+class _SemanticTokenizer:
+    """Small loader contract fake mirroring the fields used by the verifier."""
+
+    def __init__(self, path):
+        import hashlib
+
+        path = Path(path)
+        material = b"".join(
+            (path / name).read_bytes()
+            for name in ("tokenizer_config.json", "vocab.json", "merges.txt")
+            if (path / name).is_file()
+        )
+        digest = hashlib.sha256(material).hexdigest()
+        self._vocab = {"<pad>": 0, "token": int(digest[:8], 16) % 1000 + 1}
+        self._added = {"<added>": 1001}
+        self.vocab_size = 1002
+        self.all_special_tokens = ["<pad>", "<eos>"]
+        self.all_special_ids = [0, 2]
+        self.special_tokens_map = {"pad_token": "<pad>", "eos_token": "<eos>"}
+        self.chat_template = "{{ messages }}"
+        self.model_input_names = ["input_ids", "attention_mask"]
+
+    def get_vocab(self):
+        return self._vocab
+
+    def get_added_vocab(self):
+        return self._added
+
+    def __call__(self, *args, **kwargs):
+        return {"input_ids": [[1]], "attention_mask": [[1]]}
+
+
+def _fake_loaders(*, forward_ok=True, trainable=(2048, 1_000_000), adapter_keys=None, tokenizer_tamper=None):
+    def load_tokenizer(path, revision=None):
+        tokenizer = _SemanticTokenizer(path)
+        if tokenizer_tamper and Path(path).name in {"adapter-run", "merged"}:
+            if tokenizer_tamper == "special":
+                tokenizer.all_special_ids = [0, 99]
+            elif tokenizer_tamper == "chat":
+                tokenizer.chat_template = "{{ changed_messages }}"
+        return tokenizer
+
     return {
         "load_model": lambda path, dtype="bf16": {"path": str(path), "dtype": dtype},
-        "load_tokenizer": lambda path: {"tokenizer_for": str(path)},
+        "load_tokenizer": load_tokenizer,
         "load_peft_adapter": lambda base, adapter: {"base": base, "adapter": str(adapter)},
         "adapter_weight_keys": lambda path: adapter_keys
         or [
@@ -120,6 +165,40 @@ def _make_adapter_run(
 
 
 class VerifySftAdapterTest(unittest.TestCase):
+    def test_default_peft_reload_enables_trainable_parameters(self):
+        import sys
+        import types
+
+        calls = []
+
+        class _PeftModel:
+            @classmethod
+            def from_pretrained(cls, base, path, **kwargs):
+                calls.append(kwargs)
+                return cls()
+
+        with patch.dict(sys.modules, {"peft": types.SimpleNamespace(PeftModel=_PeftModel)}):
+            loaders = default_reload_loaders()
+            loaders["load_peft_adapter"]("base", "adapter")
+        self.assertEqual(calls, [{"is_trainable": True}])
+
+    def test_fake_loader_missing_semantic_contract_is_explicit_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = check_tokenizer_identity(
+                Path(tmpdir), Path(tmpdir), output_tokenizer={}, base_tokenizer={}
+            )
+        self.assertFalse(result["passed"])
+        self.assertIn("缺少 tokenizer 语义字段", result["detail"]["problems"][0])
+
+    def test_tokenizer_identity_rejects_special_and_chat_semantic_tamper(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = _make_adapter_run(Path(tmpdir))
+            for tamper in ("special", "chat"):
+                _, passed = verify_run_dir(
+                    run_dir, loaders=_fake_loaders(tokenizer_tamper=tamper)
+                )
+                self.assertFalse(passed)
+
     def test_happy_path_passes_and_patches_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = _make_adapter_run(Path(tmpdir))
@@ -202,8 +281,8 @@ class VerifySftAdapterTest(unittest.TestCase):
             _, passed = verify_run_dir(run_dir, loaders=_fake_loaders())
             self.assertFalse(passed)
 
-    def test_tokenizer_identity_tamper_fails(self):
-        """复审残留：run 目录的 tokenizer 被替换必须被字节级身份比对拦下。"""
+    def test_tokenizer_identity_semantic_tamper_fails(self):
+        """语义 vocab/config 被替换必须被解析后指纹拦下。"""
         with tempfile.TemporaryDirectory() as tmpdir:
             base = _make_base_model(Path(tmpdir))
             run_dir = _make_adapter_run(Path(tmpdir), base=base)
@@ -227,27 +306,29 @@ class VerifySftAdapterTest(unittest.TestCase):
             checks = {c["name"]: c for c in manifest["result"]["adapter_reload"]["checks"]}
             self.assertTrue(checks["tokenizer_identity_matches_base"]["passed"])
 
-    def test_tokenizer_identity_rejects_base_artifact_missing_from_output(self):
+    def test_tokenizer_identity_ignores_redundant_processor_artifact(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = _make_base_model(Path(tmpdir))
             (base / "processor_config.json").write_text("{}", encoding="utf-8")
             run_dir = _make_adapter_run(Path(tmpdir), base=base)
             _, passed = verify_run_dir(run_dir, loaders=_fake_loaders())
-            self.assertFalse(passed)
+            self.assertTrue(passed)
             manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
             check = next(c for c in manifest["result"]["adapter_reload"]["checks"] if c["name"] == "tokenizer_identity_matches_base")
-            self.assertEqual(check["detail"]["missing_in_output"], ["processor_config.json"])
+            self.assertTrue(check["passed"])
 
-    def test_tokenizer_identity_rejects_unexpected_output_artifact(self):
+    def test_tokenizer_identity_ignores_cache_and_redundant_artifact(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = _make_base_model(Path(tmpdir))
             run_dir = _make_adapter_run(Path(tmpdir), base=base)
             (run_dir / "tokenizer_extra.json").write_text("{}", encoding="utf-8")
+            (run_dir / ".cache").mkdir()
+            (run_dir / ".cache" / "tokenizer_extra.json").write_text("{}", encoding="utf-8")
             _, passed = verify_run_dir(run_dir, loaders=_fake_loaders())
-            self.assertFalse(passed)
+            self.assertTrue(passed)
             manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
             check = next(c for c in manifest["result"]["adapter_reload"]["checks"] if c["name"] == "tokenizer_identity_matches_base")
-            self.assertEqual(check["detail"]["unexpected_in_output"], ["tokenizer_extra.json"])
+            self.assertTrue(check["passed"])
 
     def test_tokenizer_identity_covers_vocab_and_merges_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -258,7 +339,7 @@ class VerifySftAdapterTest(unittest.TestCase):
             self.assertFalse(passed)
             manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
             check = next(c for c in manifest["result"]["adapter_reload"]["checks"] if c["name"] == "tokenizer_identity_matches_base")
-            self.assertIn("vocab.json", check["detail"]["hash_mismatch"])
+            self.assertFalse(check["passed"])
 
     def test_forward_failure_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -347,6 +428,9 @@ class VerifyMergedCheckpointTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             merged = _make_merged_dir(Path(tmpdir))
             _, passed = verify_merged_dir(merged, loaders=_fake_loaders())
+            # The manifest output hash audit may flag a post-merge file, but
+            # tokenizer identity itself must not treat redundant artifacts as
+            # semantic drift.
             self.assertTrue(passed)
             manifest = json.loads((merged / "merge_manifest.json").read_text(encoding="utf-8"))
             self.assertTrue(manifest["verification"]["passed"])
@@ -402,7 +486,7 @@ class VerifyMergedCheckpointTest(unittest.TestCase):
             self.assertFalse(passed)
 
     def test_merged_tokenizer_drift_fails_identity_check(self):
-        """复审残留：merge 之后 tokenizer 被替换必须被字节级身份比对拦下。"""
+        """merge 之后 tokenizer 语义被替换必须被解析后指纹拦下。"""
         with tempfile.TemporaryDirectory() as tmpdir:
             merged = _make_merged_dir(Path(tmpdir), tamper_tokenizer=True)
             _, passed = verify_merged_dir(merged, loaders=_fake_loaders())
@@ -412,15 +496,15 @@ class VerifyMergedCheckpointTest(unittest.TestCase):
             self.assertIn("tokenizer_identity_matches_base", checks)
             self.assertFalse(checks["tokenizer_identity_matches_base"]["passed"])
 
-    def test_merged_tokenizer_identity_rejects_extra_artifact(self):
+    def test_merged_tokenizer_identity_ignores_redundant_artifact(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             merged = _make_merged_dir(Path(tmpdir))
             (merged / "processor_config.json").write_text("{}", encoding="utf-8")
             _, passed = verify_merged_dir(merged, loaders=_fake_loaders())
-            self.assertFalse(passed)
+            self.assertFalse(passed)  # output hash audit catches post-merge additions
             manifest = json.loads((merged / "merge_manifest.json").read_text(encoding="utf-8"))
             check = next(c for c in manifest["verification"]["checks"] if c["name"] == "tokenizer_identity_matches_base")
-            self.assertEqual(check["detail"]["unexpected_in_output"], ["processor_config.json"])
+            self.assertTrue(check["passed"])
 
 
 class SftResumeDriftTest(unittest.TestCase):

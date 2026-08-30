@@ -93,7 +93,10 @@ def default_reload_loaders():
     def load_peft_adapter(base_model, adapter_path: str | Path):
         from peft import PeftModel
 
-        return PeftModel.from_pretrained(base_model, str(adapter_path))
+        # Verifiers compare the live LoRA parameter counts with the trainer
+        # summary.  PEFT defaults to inference mode, which freezes the adapter
+        # and makes that comparison report zero trainable parameters.
+        return PeftModel.from_pretrained(base_model, str(adapter_path), is_trainable=True)
 
     def adapter_weight_keys(adapter_path: str | Path) -> list[str]:
         from safetensors import safe_open
@@ -151,11 +154,11 @@ def resolve_device(requested: str) -> str:
         return "cpu"
 
 
-# Only files whose names identify tokenizer/processor/template artifacts are
-# part of this identity.  In particular, do not use a broad extension glob:
-# model shards and other checkpoint payloads must never become tokenizer
-# identity evidence.  The predicate is intentionally shared by adapter and
-# merged verifiers so both enforce the same exact-set contract.
+# These files are evidence for the saved output, not the tokenizer identity
+# itself.  Identity is established from the objects resolved by the base and
+# output loaders below.  This matters because ``save_pretrained`` may
+# canonicalize/merge files, and a Hub snapshot may contain cache/download
+# metadata that is not part of tokenizer semantics.
 _TOKENIZER_FILE_NAMES = {
     "tokenizer_config.json",
     "tokenizer.json",
@@ -183,6 +186,9 @@ _TOKENIZER_WEIGHT_SUFFIXES = {".safetensors", ".bin", ".pt", ".pth", ".ckpt"}
 
 def _is_tokenizer_identity_file(path: Path) -> bool:
     name = path.name.lower()
+    ignored_parts = {".cache", "cache", "downloads", "download", "snapshots", "blobs", "refs"}
+    if any(part.startswith(".") or part.lower() in ignored_parts for part in path.parts):
+        return False
     return (
         path.is_file()
         and (name in _TOKENIZER_FILE_NAMES or any(marker in name for marker in _TOKENIZER_FILE_MARKERS))
@@ -191,13 +197,7 @@ def _is_tokenizer_identity_file(path: Path) -> bool:
 
 
 def _tokenizer_identity_files(directory: Path) -> dict[str, Path]:
-    """Discover relevant tokenizer artifacts recursively by relative path.
-
-    Hugging Face tokenizers/processors are normally saved at the directory
-    root, but recursive discovery also covers processor subdirectories.  An
-    unrelated config/weight file is not included merely because it is in the
-    model directory.
-    """
+    """Discover non-cache tokenizer artifacts for output hash evidence."""
     if not directory.is_dir():
         return {}
     return {
@@ -207,53 +207,151 @@ def _tokenizer_identity_files(directory: Path) -> dict[str, Path]:
     }
 
 
-def check_tokenizer_identity(output_dir, base_dir) -> dict:
-    """Require an exact tokenizer/processor artifact set and byte identity."""
+def _canonical_json(value) -> bytes:
+    """Serialize tokenizer metadata deterministically across HF serializers."""
+    import json
+
+    def normalize(item):
+        if isinstance(item, dict):
+            return {str(key): normalize(item[key]) for key in sorted(item, key=lambda k: str(k))}
+        if isinstance(item, (list, tuple)):
+            return [normalize(part) for part in item]
+        if isinstance(item, set):
+            return sorted((normalize(part) for part in item), key=lambda part: repr(part))
+        if hasattr(item, "item") and callable(item.item):
+            try:
+                return normalize(item.item())
+            except Exception:  # pragma: no cover - unusual scalar wrappers
+                pass
+        if item is None or isinstance(item, (str, int, float, bool)):
+            return item
+        return str(item)
+
+    return json.dumps(normalize(value), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _sha256_canonical(value) -> str:
     import hashlib
 
+    return hashlib.sha256(_canonical_json(value)).hexdigest()
+
+
+def _class_identity(value) -> str:
+    cls = value.__class__
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def tokenizer_identity_fingerprint(tokenizer_or_processor) -> dict:
+    """Return semantic tokenizer identity, with an explicit capability contract.
+
+    Test fakes and third-party loaders must expose the same fields as a
+    Transformers tokenizer/processor.  Missing fields are reported rather
+    than silently falling back to artifact byte equality.
+    """
+    import hashlib
+
+    processor = tokenizer_or_processor
+    tokenizer = getattr(processor, "tokenizer", processor)
+    missing: list[str] = []
+
+    def read(name, source=tokenizer, *, callable_required=False):
+        value = getattr(source, name, None)
+        if value is None or (callable_required and not callable(value)):
+            missing.append(name)
+            return None
+        try:
+            return value() if callable_required else value
+        except Exception as exc:  # expose loader contract failures as data
+            missing.append(f"{name} ({exc.__class__.__name__})")
+            return None
+
+    vocab = read("get_vocab", callable_required=True)
+    added_vocab = read("get_added_vocab", callable_required=True)
+    vocab_size = read("vocab_size")
+    all_special_tokens = read("all_special_tokens")
+    all_special_ids = read("all_special_ids")
+    special_tokens_map = read("special_tokens_map")
+    if hasattr(processor, "chat_template"):
+        chat_template = read("chat_template", processor)
+    elif processor is not tokenizer:
+        chat_template = read("chat_template", tokenizer)
+    else:
+        chat_template = read("chat_template", processor)
+    if hasattr(processor, "model_input_names"):
+        model_input_names = read("model_input_names", processor)
+    elif processor is not tokenizer:
+        model_input_names = read("model_input_names", tokenizer)
+    else:
+        model_input_names = read("model_input_names", processor)
+
+    # Keep hashes and the canonical values that are useful in a verifier
+    # report.  The vocabulary hash covers every token -> id pair, not merely a
+    # file that happened to be emitted by a particular serializer.
+    fingerprint = {
+        "schema_version": "tokenizer-semantic-v1",
+        # Do not use ``token`` in manifest field names: manifests are checked
+        # for secret-bearing key fragments.  These names still explicitly
+        # record both resolved component classes.
+        "processor_type": _class_identity(processor),
+        "encoder_type": _class_identity(tokenizer),
+        "vocab_sha256": _sha256_canonical(vocab) if vocab is not None else None,
+        "added_vocab_sha256": _sha256_canonical(added_vocab) if added_vocab is not None else None,
+        "vocab_size": vocab_size,
+        "special_values": all_special_tokens,
+        "special_ids": all_special_ids,
+        "special_map_sha256": _sha256_canonical(special_tokens_map),
+        "chat_template_sha256": _sha256_canonical(chat_template),
+        "model_input_names": model_input_names,
+    }
+    fingerprint["semantic_sha256"] = hashlib.sha256(_canonical_json(fingerprint)).hexdigest()
+    fingerprint["missing_fields"] = sorted(set(missing))
+    fingerprint["supported"] = not missing
+    return fingerprint
+
+
+def tokenizer_artifact_hashes(directory) -> list[dict[str, str]]:
+    """Hash emitted tokenizer files for audit without making them identity."""
+    import hashlib
+
+    return [
+        {"path": name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        for name, path in sorted(_tokenizer_identity_files(Path(directory)).items())
+    ]
+
+
+def check_tokenizer_identity(
+    output_dir,
+    base_dir,
+    *,
+    output_tokenizer=None,
+    base_tokenizer=None,
+) -> dict:
+    """Compare resolved tokenizer/processor semantics, not serialized files."""
     output_dir = Path(output_dir)
     base_dir = Path(base_dir)
-
-    def _hash(path: Path) -> str:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-
-    if not base_dir.is_dir() or not output_dir.is_dir():
-        return {
-            "name": "tokenizer_identity_matches_base",
-            "passed": False,
-            "detail": {
-                "reason": f"base/output 目录不存在，无法比对 tokenizer：{base_dir} / {output_dir}",
-                "missing_in_output": [],
-                "unexpected_in_output": [],
-                "hash_mismatch": [],
-            },
-        }
-    base_files = _tokenizer_identity_files(base_dir)
-    output_files = _tokenizer_identity_files(output_dir)
-    base_names = set(base_files)
-    output_names = set(output_files)
-    missing_in_output = sorted(base_names - output_names)
-    unexpected_in_output = sorted(output_names - base_names)
-    hash_mismatch = sorted(
-        name
-        for name in base_names & output_names
-        if _hash(base_files[name]) != _hash(output_files[name])
-    )
-    passed = bool(base_names) and not (
-        missing_in_output or unexpected_in_output or hash_mismatch
-    )
+    output_fp = tokenizer_identity_fingerprint(output_tokenizer) if output_tokenizer is not None else None
+    base_fp = tokenizer_identity_fingerprint(base_tokenizer) if base_tokenizer is not None else None
+    problems = []
+    if output_fp is None or base_fp is None:
+        problems.append("必须提供 base/output loader 解析结果")
+    else:
+        if not output_fp["supported"]:
+            problems.append(f"output loader 缺少 tokenizer 语义字段: {output_fp['missing_fields']}")
+        if not base_fp["supported"]:
+            problems.append(f"base loader 缺少 tokenizer 语义字段: {base_fp['missing_fields']}")
+        if output_fp["supported"] and base_fp["supported"] and output_fp["semantic_sha256"] != base_fp["semantic_sha256"]:
+            problems.append("base/output resolved tokenizer semantic fingerprint 不一致")
     detail = {
-        "base_files": sorted(base_names),
-        "output_files": sorted(output_names),
-        "missing_in_output": missing_in_output,
-        "unexpected_in_output": unexpected_in_output,
-        "hash_mismatch": hash_mismatch,
         "base_dir": str(base_dir),
+        "output_dir": str(output_dir),
+        "base_fingerprint": base_fp,
+        "output_fingerprint": output_fp,
+        "output_artifact_sha256": tokenizer_artifact_hashes(output_dir),
+        "base_artifact_sha256": tokenizer_artifact_hashes(base_dir),
+        "problems": problems,
     }
-    if not base_names:
-        detail["reason"] = "基座目录没有可识别的 tokenizer/processor 文件"
     return {
         "name": "tokenizer_identity_matches_base",
-        "passed": passed,
+        "passed": not problems,
         "detail": detail,
     }

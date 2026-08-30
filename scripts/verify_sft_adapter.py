@@ -27,6 +27,7 @@ from shopping_grpo.training.sft.reload_check import (  # noqa: E402
     check_tokenizer_identity,
     default_reload_loaders,
     resolve_device,
+    tokenizer_artifact_hashes,
 )
 from shopping_grpo.training.sft.run_manifest import (  # noqa: E402
     FROZEN_MODEL_REVISION,
@@ -338,6 +339,7 @@ def verify_run_dir(
             )
 
     tokenizer = None
+    base_tokenizer = None
     if files["passed"]:
         try:
             # Keep the tokenizer/processor on the exact same frozen snapshot
@@ -359,12 +361,34 @@ def verify_run_dir(
         else:
             checks.append({"name": "tokenizer_or_processor_loadable", "passed": True, "detail": {}})
 
-    # tokenizer 字节级身份：run 目录里的 tokenizer 文件必须与基座逐文件一致。
-    # revision 透传挡住的是 hub 漂移；这一步挡住的是"本地目录里 tokenizer 被换过"。
+    # Compare the semantic objects resolved by both loaders.  Serialized files
+    # are retained as audit hashes, but save_pretrained normalization and Hub
+    # cache metadata must not become an identity contract.
     if files["passed"] and manifest is not None:
         base_model_path = base_override or (manifest.get("model") or {}).get("path_or_repo")
         if base_model_path:
-            checks.append(check_tokenizer_identity(run_dir, base_model_path))
+            try:
+                base_tokenizer = _call_loader(
+                    loaders["load_tokenizer"],
+                    base_model_path,
+                    revision=revision or FROZEN_MODEL_REVISION,
+                )
+            except Exception as exc:  # noqa: BLE001
+                checks.append(
+                    {
+                        "name": "base_tokenizer_or_processor_loadable",
+                        "passed": False,
+                        "detail": {"error": f"{exc.__class__.__name__}: {exc}"},
+                    }
+                )
+            checks.append(
+                check_tokenizer_identity(
+                    run_dir,
+                    base_model_path,
+                    output_tokenizer=tokenizer,
+                    base_tokenizer=base_tokenizer,
+                )
+            )
 
     if summary is not None:
         checks.append(check_summary_sanity(summary, manifest))
@@ -401,6 +425,7 @@ def verify_run_dir(
             "device": resolve_device(device_request),
             "revision": revision,
             "checks": checks,
+            "preprocessing_output_files_sha256": tokenizer_artifact_hashes(run_dir),
             "verified_at_epoch_s": int(time.time()),
             "verifier_code_sha256": sha256_file(Path(__file__).resolve()),
         }
