@@ -74,6 +74,15 @@ def _resolved_revision(config):
     return None
 
 
+def _manifest_path_identity(value, *, local_required: bool) -> str:
+    """Record local artifacts as absolute paths; preserve remote repo IDs."""
+
+    path = Path(value).expanduser()
+    if local_required or path.exists():
+        return str(path.resolve())
+    return str(value)
+
+
 def build_merge_manifest(
     base_model,
     adapter_path,
@@ -163,10 +172,14 @@ def main():
     processor.save_pretrained(str(args.output))
     del merged, base
 
+    base_identity = _manifest_path_identity(args.base_model, local_required=False)
+    adapter_identity = _manifest_path_identity(args.adapter, local_required=True)
+    output_identity = _manifest_path_identity(args.output, local_required=True)
+
     manifest = build_merge_manifest(
-        args.base_model,
-        args.adapter,
-        args.output,
+        base_identity,
+        adapter_identity,
+        output_identity,
         config.model_type,
         merge={
             "dtype": dtype_name,

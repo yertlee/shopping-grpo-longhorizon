@@ -1,8 +1,14 @@
 """验证 LoRA 合并入口的纯配置逻辑，不需要本地下载模型。"""
 
+import tempfile
 import unittest
+from pathlib import Path
 
-from scripts.merge_lora_adapter import build_merge_manifest, choose_model_class
+from scripts.merge_lora_adapter import (
+    _manifest_path_identity,
+    build_merge_manifest,
+    choose_model_class,
+)
 
 
 class _Config:
@@ -11,6 +17,18 @@ class _Config:
 
 
 class MergeLoraAdapterTest(unittest.TestCase):
+    def test_manifest_identity_resolves_local_paths_but_preserves_repo_ids(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmpdir:
+            relative = Path(tmpdir).relative_to(Path.cwd())
+            self.assertEqual(
+                _manifest_path_identity(relative, local_required=True),
+                str(Path(tmpdir).resolve()),
+            )
+        self.assertEqual(
+            _manifest_path_identity("Qwen/Qwen3.5-2B", local_required=False),
+            "Qwen/Qwen3.5-2B",
+        )
+
     def test_qwen35_uses_multimodal_model_class(self):
         self.assertEqual(choose_model_class(_Config("qwen3_5"), "causal", "multimodal"), "multimodal")
         self.assertEqual(choose_model_class(_Config("qwen3"), "causal", "multimodal"), "causal")
