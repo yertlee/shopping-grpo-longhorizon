@@ -216,13 +216,32 @@ def _call_loader(loader, *args, revision=None):
 def check_dtype_config(merged_dir: Path, manifest: dict) -> dict:
     config = json.loads((merged_dir / "config.json").read_text(encoding="utf-8"))
     recorded_dtype = manifest.get("merge", {}).get("dtype")
-    torch_dtype = str(config.get("torch_dtype"))
-    expected = {"bfloat16": "bfloat16", "float16": "float16", "float32": "float32"}.get(recorded_dtype or "", "")
-    passed = bool(expected) and torch_dtype == expected
+    # Transformers 5 serializes this as ``dtype``; Transformers 4 used
+    # ``torch_dtype``.  They represent the same checkpoint contract.
+    config_dtype = config.get("dtype", config.get("torch_dtype"))
+    aliases = {
+        "bf16": "bfloat16",
+        "bfloat16": "bfloat16",
+        "torch.bfloat16": "bfloat16",
+        "fp16": "float16",
+        "float16": "float16",
+        "torch.float16": "float16",
+        "fp32": "float32",
+        "float32": "float32",
+        "torch.float32": "float32",
+    }
+    expected = aliases.get(str(recorded_dtype), "")
+    resolved = aliases.get(str(config_dtype), "")
+    passed = bool(expected) and resolved == expected
     return {
         "name": "config_dtype_matches_manifest",
         "passed": passed,
-        "detail": {"config_torch_dtype": torch_dtype, "manifest_dtype": recorded_dtype},
+        "detail": {
+            "config_dtype": config_dtype,
+            "config_field": "dtype" if "dtype" in config else "torch_dtype",
+            "manifest_dtype": recorded_dtype,
+            "normalized_dtype": resolved,
+        },
     }
 
 

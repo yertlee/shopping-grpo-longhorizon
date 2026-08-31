@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from scripts.merge_lora_adapter import build_merge_manifest, choose_model_class
 from scripts.train_lora_sft import _resume_execution_manifest_path
-from scripts.verify_merged_checkpoint import verify_merged_dir
+from scripts.verify_merged_checkpoint import check_dtype_config, verify_merged_dir
 from scripts.verify_sft_adapter import verify_run_dir
 from shopping_grpo.training.sft.reload_check import (
     ForwardResult,
@@ -187,6 +187,46 @@ def _make_adapter_run(
 
 
 class VerifySftAdapterTest(unittest.TestCase):
+    def test_default_reload_accepts_manifest_bfloat16_name(self):
+        import sys
+        import types
+
+        calls = []
+
+        class _Config:
+            model_type = "qwen3_5"
+
+        class _AutoConfig:
+            @classmethod
+            def from_pretrained(cls, path, **kwargs):
+                return _Config()
+
+        class _Model:
+            config = _Config()
+
+            @classmethod
+            def from_pretrained(cls, path, **kwargs):
+                calls.append(kwargs["torch_dtype"])
+                return cls()
+
+        fake_torch = types.SimpleNamespace(
+            bfloat16="TORCH_BF16",
+            float16="TORCH_FP16",
+            float32="TORCH_FP32",
+        )
+        fake_transformers = types.SimpleNamespace(
+            AutoConfig=_AutoConfig,
+            AutoModelForCausalLM=_Model,
+            AutoModelForMultimodalLM=_Model,
+        )
+        with patch.dict(
+            sys.modules,
+            {"torch": fake_torch, "transformers": fake_transformers},
+        ):
+            default_reload_loaders()["load_model"]("merged", "bfloat16")
+
+        self.assertEqual(calls, ["TORCH_BF16"])
+
     def test_interrupted_canonical_uses_successful_resume_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = _make_adapter_run(Path(tmpdir))
@@ -467,6 +507,23 @@ def _make_merged_dir(tmpdir: Path, *, dtype="bfloat16", corrupt=False, tamper_ba
 
 
 class VerifyMergedCheckpointTest(unittest.TestCase):
+    def test_transformers5_dtype_field_matches_bfloat16_manifest(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            merged = _make_merged_dir(Path(tmpdir))
+            config_path = merged / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["dtype"] = config.pop("torch_dtype")
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            manifest = json.loads(
+                (merged / "merge_manifest.json").read_text(encoding="utf-8")
+            )
+
+            result = check_dtype_config(merged, manifest)
+
+            self.assertTrue(result["passed"])
+            self.assertEqual(result["detail"]["config_field"], "dtype")
+            self.assertEqual(result["detail"]["normalized_dtype"], "bfloat16")
+
     def test_happy_path_passes_and_writes_verification_block(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             merged = _make_merged_dir(Path(tmpdir))

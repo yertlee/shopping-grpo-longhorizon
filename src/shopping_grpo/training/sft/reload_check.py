@@ -55,7 +55,16 @@ def default_reload_loaders():
         import torch
         from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForMultimodalLM
 
-        dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+        dtype_map = {
+            "bf16": torch.bfloat16,
+            "bfloat16": torch.bfloat16,
+            "fp16": torch.float16,
+            "float16": torch.float16,
+            "fp32": torch.float32,
+            "float32": torch.float32,
+        }
+        if dtype not in dtype_map:
+            raise ValueError(f"unsupported reload dtype: {dtype!r}")
         load_kwargs = {"trust_remote_code": True}
         if revision is not None:
             load_kwargs["revision"] = revision
