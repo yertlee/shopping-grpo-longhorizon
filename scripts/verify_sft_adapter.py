@@ -33,6 +33,7 @@ from shopping_grpo.training.sft.run_manifest import (  # noqa: E402
     FROZEN_MODEL_REVISION,
     hash_weight_files,
     load_run_manifest,
+    resolve_successful_run_manifest_path,
     sha256_file,
     sha256_text,
     write_run_manifest,
@@ -275,8 +276,10 @@ def verify_run_dir(
     checks.append(files)
 
     manifest = None
-    if (run_dir / MANIFEST_FILE).is_file():
-        manifest = load_run_manifest(run_dir / MANIFEST_FILE, verify_run_id=False)
+    manifest_path = run_dir / MANIFEST_FILE
+    if manifest_path.is_file():
+        manifest_path = resolve_successful_run_manifest_path(run_dir)
+        manifest = load_run_manifest(manifest_path, verify_run_id=False)
     summary = None
     if (run_dir / SUMMARY_FILE).is_file():
         summary = json.loads((run_dir / SUMMARY_FILE).read_text(encoding="utf-8"))
@@ -429,7 +432,7 @@ def verify_run_dir(
             "verified_at_epoch_s": int(time.time()),
             "verifier_code_sha256": sha256_file(Path(__file__).resolve()),
         }
-        write_run_manifest(run_dir / MANIFEST_FILE, manifest)
+        write_run_manifest(manifest_path, manifest)
     return manifest, all_passed
 
 

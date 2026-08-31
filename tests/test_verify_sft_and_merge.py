@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.merge_lora_adapter import build_merge_manifest, choose_model_class
+from scripts.train_lora_sft import _resume_execution_manifest_path
 from scripts.verify_merged_checkpoint import verify_merged_dir
 from scripts.verify_sft_adapter import verify_run_dir
 from shopping_grpo.training.sft.reload_check import (
@@ -20,6 +21,27 @@ from shopping_grpo.training.sft.reload_check import (
 from shopping_grpo.training.sft.run_manifest import sha256_bytes
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+class ResumeManifestSelectionTest(unittest.TestCase):
+    def test_pending_canonical_is_finalized_in_place(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest = {"execution": {"exit_code": None}}
+            self.assertEqual(
+                _resume_execution_manifest_path(root, manifest),
+                root / "run_manifest.json",
+            )
+
+    def test_finalized_execution_gets_next_immutable_resume_record(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "run_manifest.resume.1.json").write_text("{}", encoding="utf-8")
+            manifest = {"execution": {"exit_code": 0}}
+            self.assertEqual(
+                _resume_execution_manifest_path(root, manifest),
+                root / "run_manifest.resume.2.json",
+            )
 
 
 class _SemanticTokenizer:
@@ -165,6 +187,27 @@ def _make_adapter_run(
 
 
 class VerifySftAdapterTest(unittest.TestCase):
+    def test_interrupted_canonical_uses_successful_resume_manifest(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = _make_adapter_run(Path(tmpdir))
+            canonical_path = run_dir / "run_manifest.json"
+            canonical = json.loads(canonical_path.read_text(encoding="utf-8"))
+            canonical["execution"]["exit_code"] = None
+            canonical_path.write_text(json.dumps(canonical), encoding="utf-8")
+
+            resumed = json.loads(json.dumps(canonical))
+            resumed["execution"]["exit_code"] = 0
+            resume_path = run_dir / "run_manifest.resume.1.json"
+            resume_path.write_text(json.dumps(resumed), encoding="utf-8")
+
+            _, passed = verify_run_dir(run_dir, loaders=_fake_loaders())
+
+            self.assertTrue(passed)
+            canonical_after = json.loads(canonical_path.read_text(encoding="utf-8"))
+            resumed_after = json.loads(resume_path.read_text(encoding="utf-8"))
+            self.assertIsNone(canonical_after["execution"]["exit_code"])
+            self.assertTrue(resumed_after["result"]["adapter_reload"]["passed"])
+
     def test_default_peft_reload_enables_trainable_parameters(self):
         import sys
         import types

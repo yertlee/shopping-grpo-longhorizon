@@ -13,6 +13,7 @@ from shopping_grpo.training.sft.run_manifest import (
     finalize_run_manifest,
     hash_weight_files,
     load_run_manifest,
+    resolve_successful_run_manifest_path,
     write_run_manifest,
     write_checkpoint_owner,
     validate_checkpoint_owner,
@@ -54,6 +55,64 @@ def _make_manifest(tmpdir: Path, *, train_name="train.jsonl", recipe_extra=None)
 
 
 class SftRunManifestTest(unittest.TestCase):
+    def test_resolver_selects_latest_successful_resume_for_interrupted_canonical(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            canonical = _make_manifest(root)
+            write_run_manifest(root / "run_manifest.json", canonical)
+
+            failed = json.loads(json.dumps(canonical))
+            finalize_run_manifest(
+                failed,
+                train_examples=1,
+                validation_examples=0,
+                train_loss=None,
+                eval_loss=None,
+                peak_gpu_memory_gib=None,
+                checkpoint_paths=["checkpoint-1"],
+                exit_code=1,
+            )
+            write_run_manifest(root / "run_manifest.resume.1.json", failed)
+
+            successful = json.loads(json.dumps(canonical))
+            finalize_run_manifest(
+                successful,
+                train_examples=1,
+                validation_examples=0,
+                train_loss=0.25,
+                eval_loss=None,
+                peak_gpu_memory_gib=1.0,
+                checkpoint_paths=["checkpoint-2"],
+                exit_code=0,
+            )
+            write_run_manifest(root / "run_manifest.resume.2.json", successful)
+
+            self.assertEqual(
+                resolve_successful_run_manifest_path(root),
+                root / "run_manifest.resume.2.json",
+            )
+
+    def test_resolver_rejects_resume_from_different_run(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            canonical = _make_manifest(root)
+            write_run_manifest(root / "run_manifest.json", canonical)
+            other = _make_manifest(root, train_name="other.jsonl", recipe_extra={"seed": 7})
+            finalize_run_manifest(
+                other,
+                train_examples=1,
+                validation_examples=0,
+                train_loss=0.25,
+                eval_loss=None,
+                peak_gpu_memory_gib=1.0,
+                checkpoint_paths=["checkpoint-2"],
+                exit_code=0,
+            )
+            write_run_manifest(root / "run_manifest.resume.1.json", other)
+
+            with self.assertRaisesRegex(ValueError, "run_id mismatch"):
+                resolve_successful_run_manifest_path(root)
+
     def test_manifest_records_inputs_and_is_content_addressed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             manifest = _make_manifest(Path(tmpdir))

@@ -104,6 +104,18 @@ def _manifest_drift(existing: dict, candidate: dict) -> list[str]:
     return drift
 
 
+def _resume_execution_manifest_path(output: Path, existing_manifest: dict) -> Path:
+    """Choose where a resumed execution records its mutable result state."""
+
+    canonical = Path(output) / "run_manifest.json"
+    if existing_manifest.get("execution", {}).get("exit_code") is None:
+        return canonical
+    resume_index = 1
+    while (Path(output) / f"run_manifest.resume.{resume_index}.json").exists():
+        resume_index += 1
+    return Path(output) / f"run_manifest.resume.{resume_index}.json"
+
+
 def _write_failure_manifest_if_pending():
     """main() 未走到成功 finalize 时，把失败写进 run manifest；不吞异常。"""
     path = _RUN_STATE["manifest_path"]
@@ -677,13 +689,11 @@ def main():
                 "resume 前合同漂移检查失败：当前模型/数据/配方/代码与该 checkpoint "
                 f"的原始 run 不一致，拒绝续训（--output={args.output}）。\n漂移项：\n  {detail}"
             )
-        # Preserve the finalized source manifest.  A resume is a new execution
-        # record with the same identity, so finalize/failure handling cannot
-        # accidentally report or overwrite the original run.
-        resume_index = 1
-        while (args.output / f"run_manifest.resume.{resume_index}.json").exists():
-            resume_index += 1
-        manifest_path = args.output / f"run_manifest.resume.{resume_index}.json"
+        # An interrupted process can leave the canonical manifest pending.
+        # In that case the successful resume must finalize the canonical file
+        # consumed by verifier/merge.  Preserve only already-finalized source
+        # executions and append later attempts as immutable resume records.
+        manifest_path = _resume_execution_manifest_path(args.output, existing_manifest)
     write_run_manifest(manifest_path, run_manifest)
     _RUN_STATE["manifest_path"] = manifest_path
 

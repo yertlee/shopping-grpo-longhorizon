@@ -16,6 +16,7 @@ if str(ROOT / "src") not in sys.path:
 from shopping_grpo.training.sft.run_manifest import (  # noqa: E402
     FROZEN_MODEL_REVISION,
     load_run_manifest,
+    resolve_successful_run_manifest_path,
     sha256_file,
     validate_model_revision,
     validate_run_id,
@@ -44,6 +45,7 @@ def _read_source_run_id(adapter_path: Path) -> str | None:
     if not manifest_path.is_file():
         return None
     try:
+        manifest_path = resolve_successful_run_manifest_path(adapter_path)
         manifest = load_run_manifest(manifest_path)
         identity = validate_run_id(manifest)
         if not identity["passed"]:

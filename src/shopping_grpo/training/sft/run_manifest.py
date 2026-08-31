@@ -457,3 +457,48 @@ def load_run_manifest(path: str | Path, *, verify_run_id: bool = True) -> dict:
                 f"recorded={identity['actual']!r}, recomputed={identity['expected']!r}"
             )
     return manifest
+
+
+def resolve_successful_run_manifest_path(run_dir: str | Path) -> Path:
+    """Return the latest successful manifest for one content-addressed SFT run.
+
+    Interrupted executions can leave ``run_manifest.json`` pending while a
+    later resume is finalized as ``run_manifest.resume.N.json``.  Consumers
+    must use the latest successful execution record, but every resume record
+    must still belong to the canonical manifest's run_id.
+
+    If no execution has succeeded yet, return the canonical path so callers
+    can report its pending/failed state rather than pretending it is missing.
+    """
+
+    root = Path(run_dir)
+    canonical_path = root / "run_manifest.json"
+    # Selection compares recorded identities only.  The verifier must still
+    # be able to load a tampered manifest and report its run_id check as FAIL
+    # instead of crashing before checks are recorded.  Strict consumers such
+    # as merge reload the selected path with verify_run_id=True.
+    canonical = load_run_manifest(canonical_path, verify_run_id=False)
+    canonical_run_id = canonical["run_id"]
+    successful: list[tuple[int, Path]] = []
+    if canonical.get("execution", {}).get("exit_code") == 0:
+        successful.append((0, canonical_path))
+
+    prefix = "run_manifest.resume."
+    suffix = ".json"
+    for path in root.glob(f"{prefix}*{suffix}"):
+        name = path.name
+        index_text = name[len(prefix) : -len(suffix)]
+        if not index_text.isdigit():
+            raise ValueError(f"invalid resume manifest filename: {name}")
+        manifest = load_run_manifest(path, verify_run_id=False)
+        if manifest.get("run_id") != canonical_run_id:
+            raise ValueError(
+                "resume manifest run_id mismatch: "
+                f"{name}={manifest.get('run_id')!r}, canonical={canonical_run_id!r}"
+            )
+        if manifest.get("execution", {}).get("exit_code") == 0:
+            successful.append((int(index_text), path))
+
+    if successful:
+        return max(successful, key=lambda item: item[0])[1]
+    return canonical_path
