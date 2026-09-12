@@ -1,0 +1,3 @@
+src/shopping_grpo/environment/projection.py -text
+src/shopping_grpo/environment/actions.py -text
+*.sh text eol=lf

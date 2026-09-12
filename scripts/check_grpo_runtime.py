@@ -22,13 +22,19 @@ EXPECTED_VERSIONS = {
     "swanlab": "0.9.1",
 }
 EXPECTED_TRANSFORMERS_REVISION = "7ea2320c76117e6742364808a666ef6f2fb40a67"
-PATCH_MARKER = "SHOPPING_GRPO_DYNAMIC_SAMPLING_PATCH_V3"
-# patched SHA 口径必须与 scripts/apply_verl_dynamic_sampling_patch.py 完全一致：
-# runtime gate 不能只看 marker，还要比对打补丁后文件的最终 SHA256（audit item 5）。
+# Keep runtime validation tied to the patch applicator's single marker/hash source.
 try:
-    from scripts.apply_verl_dynamic_sampling_patch import EXPECTED_PATCHED_SHA256, sha256
-except ImportError:  # 以 `python scripts/check_grpo_runtime.py` 直接执行时
-    from apply_verl_dynamic_sampling_patch import EXPECTED_PATCHED_SHA256, sha256  # type: ignore[no-redef]
+    from scripts.apply_verl_dynamic_sampling_patch import (
+        EXPECTED_PATCHED_SHA256,
+        PATCH_MARKER,
+        sha256,
+    )
+except ImportError:  # direct script execution
+    from apply_verl_dynamic_sampling_patch import (  # type: ignore[no-redef]
+        EXPECTED_PATCHED_SHA256,
+        PATCH_MARKER,
+        sha256,
+    )
 MAX_SAFE_RESPONSE_LENGTH = 20480
 MAX_SAFE_SEQUENCE_LENGTH = 24576
 CURRENT_RUNTIME_FILES = {
@@ -217,6 +223,48 @@ def validate_actor_ref_model_contract(config):
             sort_keys=True,
         )
     )
+
+
+def validate_synchronous_checkpoint_save(config):
+    """The stop barrier is valid only when checkpoint persistence is synchronous."""
+    if not os.environ.get("SHOPPING_GRPO_STOP_AFTER_STEP"):
+        return
+
+    actor = config.get("actor_rollout_ref", {})
+    actor = actor.get("actor", {}) if hasattr(actor, "get") else {}
+    checkpoint = actor.get("checkpoint", {}) if hasattr(actor, "get") else {}
+    async_save = checkpoint.get("async_save", False) if hasattr(checkpoint, "get") else None
+    if not isinstance(async_save, bool):
+        raise SystemExit(
+            "stop-after-step cannot prove actor_rollout_ref.actor.checkpoint.async_save "
+            f"is boolean; got {async_save!r}"
+        )
+    if async_save:
+        raise SystemExit(
+            "stop-after-step requires synchronous actor checkpoint saving; "
+            "actor_rollout_ref.actor.checkpoint.async_save=true"
+        )
+
+    def async_checkpoint_enabled(node) -> list[str]:
+        found: list[str] = []
+        if hasattr(node, "items"):
+            for key, value in node.items():
+                key_text = str(key).lower()
+                if (
+                    "async" in key_text
+                    and ("checkpoint" in key_text or "save" in key_text)
+                    and str(value).lower() in {"true", "1", "yes"}
+                ):
+                    found.append(str(key))
+                found.extend(async_checkpoint_enabled(value))
+        return found
+
+    async_keys = async_checkpoint_enabled(config.get("trainer", {}))
+    if async_keys:
+        raise SystemExit(
+            "stop-after-step requires synchronous checkpoint saving; "
+            "async save/checkpoint options are enabled: " + ", ".join(async_keys)
+        )
 
 
 def validate_dynamic_sampling(config, verl_source: Path, installed):
@@ -502,6 +550,7 @@ def main():
         raise SystemExit("veRL 0.8 built-in qwen3_coder parser is unavailable")
     if "swanlab" not in Tracking.supported_backend:
         raise SystemExit("veRL 0.8 SwanLab tracking backend is unavailable")
+    validate_synchronous_checkpoint_save(config)
     validate_dynamic_sampling(config, verl_source, installed)
     validate_swanlab_tracking(config)
     install_torch_padding_fallback()

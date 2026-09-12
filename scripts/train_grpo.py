@@ -85,6 +85,10 @@ DEFAULT_GLOBAL_STEP_FILES = (
 _STEP_DIR_RE = re.compile(r"(?:global_step_|step_)?(\d+)")
 # 记录进 run manifest 的环境变量：只记录本项目显式设置的非 secret 变量。
 RUNTIME_ENV_KEYS = (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
     "PYTHONPATH",
     "SHOPPING_GRPO_ROOT",
     "SHOPPING_ENVIRONMENT_VERSION",
@@ -98,7 +102,10 @@ RUNTIME_ENV_KEYS = (
     "SHOPPING_AGENT_LOOP_CONFIG",
     "SHOPPING_TOOL_CONFIG",
     "GRPO_CONFIG_NAME",
+    "SHOPPING_GRPO_STOP_AFTER_STEP",
+    "SHOPPING_GRPO_ACTOR_CHECKPOINT_ASYNC_SAVE",
 )
+ACTOR_CHECKPOINT_ASYNC_SAVE_PATH = "actor_rollout_ref.actor.checkpoint.async_save"
 
 
 def _model_has_weights(path: Path) -> bool:
@@ -111,7 +118,7 @@ def _model_has_weights(path: Path) -> bool:
     return any((path / name).is_file() for name in candidates)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL)
     parser.add_argument(
@@ -131,6 +138,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--experiment-name", default="shopping-agent-grpo")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--stop-after-step",
+        type=int,
+        help="自然收尾目标 optimizer step；必须是正整数且落在 checkpoint 边界",
+    )
     parser.add_argument(
         "--smoke",
         action="store_true",
@@ -202,7 +214,10 @@ def parse_args() -> argparse.Namespace:
         nargs=argparse.REMAINDER,
         help="additional veRL Hydra overrides after --",
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.stop_after_step is not None and args.stop_after_step <= 0:
+        parser.error("--stop-after-step must be a positive integer")
+    return args
 
 
 def _validated_path(path: Path, description: str) -> Path:
@@ -258,6 +273,110 @@ def hydra_overrides(args: argparse.Namespace) -> list[str]:
     return overrides
 
 
+def _configured_trainer_value(args: argparse.Namespace, key: str) -> int | None:
+    """Resolve a trainer integer sufficiently early for stop-barrier fail-closed checks."""
+    if args.smoke:
+        return {
+            "save_freq": 1,
+            "total_training_steps": int(args.smoke_steps),
+        }.get(key)
+    try:
+        text = args.config.expanduser().read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(
+        rf"(?ms)^trainer:\s*\n(?:^[ \t]+.*\n)*?^[ \t]+{re.escape(key)}:\s*([0-9]+)\b",
+        text,
+    )
+    value = int(match.group(1)) if match else None
+    for override in args.hydra_overrides:
+        if override == "--":
+            continue
+        override_match = re.fullmatch(rf"trainer\.{re.escape(key)}=([0-9]+)", override)
+        if override_match:
+            value = int(override_match.group(1))
+        elif override.startswith(f"trainer.{key}="):
+            return None
+    return value
+
+
+def _actor_checkpoint_async_save_evidence(args: argparse.Namespace) -> dict[str, object]:
+    """Resolve veRL's actor checkpoint async_save before a stop-barrier run."""
+    if args.stop_after_step is None:
+        return {"value": False, "source": "not_applicable_without_stop_after_step"}
+    try:
+        import yaml
+
+        config = yaml.safe_load(args.config.expanduser().read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        raise SystemExit(
+            "stop-after-step requires parseable config to prove "
+            f"{ACTOR_CHECKPOINT_ASYNC_SAVE_PATH}=false: {exc}"
+        ) from exc
+    missing = object()
+    node: object = config
+    for part in ACTOR_CHECKPOINT_ASYNC_SAVE_PATH.split("."):
+        if not isinstance(node, dict) or part not in node:
+            node = missing
+            break
+        node = node[part]
+    value = False if node is missing else node
+    if not isinstance(value, bool):
+        raise SystemExit(
+            f"stop-after-step cannot prove {ACTOR_CHECKPOINT_ASYNC_SAVE_PATH} is boolean; "
+            f"got {value!r}"
+        )
+    source = "config" if node is not missing else "veRL-0.8-default"
+    for raw_override in args.hydra_overrides:
+        override = raw_override[1:] if raw_override.startswith("+") else raw_override
+        if ACTOR_CHECKPOINT_ASYNC_SAVE_PATH not in override:
+            continue
+        prefix = ACTOR_CHECKPOINT_ASYNC_SAVE_PATH + "="
+        if not override.startswith(prefix):
+            raise SystemExit(
+                "stop-after-step cannot parse actor checkpoint async_save override: "
+                f"{raw_override!r}"
+            )
+        literal = override[len(prefix):].strip().lower()
+        if literal not in {"true", "false"}:
+            raise SystemExit(
+                "stop-after-step requires actor checkpoint async_save override to be "
+                f"literal true/false, got {raw_override!r}"
+            )
+        value = literal == "true"
+        source = f"override:{raw_override}"
+    if value:
+        raise SystemExit(
+            "stop-after-step requires synchronous actor checkpoint saving; "
+            f"{ACTOR_CHECKPOINT_ASYNC_SAVE_PATH}=true"
+        )
+    return {"value": False, "source": source, "path": ACTOR_CHECKPOINT_ASYNC_SAVE_PATH}
+
+
+def _validate_stop_after_step(args: argparse.Namespace) -> None:
+    if args.stop_after_step is None:
+        return
+    if args.smoke and args.stop_after_step > args.smoke_steps:
+        raise SystemExit("--stop-after-step cannot exceed --smoke-steps")
+    save_freq = _configured_trainer_value(args, "save_freq")
+    if save_freq is None or save_freq <= 0:
+        raise SystemExit(
+            "--stop-after-step requires a statically verifiable positive trainer.save_freq"
+        )
+    if args.stop_after_step % save_freq:
+        raise SystemExit(
+            "--stop-after-step must be an exact checkpoint boundary: "
+            f"{args.stop_after_step} % trainer.save_freq({save_freq}) != 0"
+        )
+    total_steps = _configured_trainer_value(args, "total_training_steps")
+    if total_steps is None or total_steps < args.stop_after_step:
+        raise SystemExit(
+            "--stop-after-step requires trainer.total_training_steps >= target: "
+            f"{total_steps!r} < {args.stop_after_step}"
+        )
+    _actor_checkpoint_async_save_evidence(args)
+
+
 def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
     model = _validated_path(args.model, "model directory")
     if not model.is_dir() or not (model / "config.json").is_file():
@@ -270,6 +389,7 @@ def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
     train_data = _validated_path(args.train_data, "train parquet")
     val_data = _validated_path(args.val_data, "validation parquet")
     config = _validated_path(args.config, "GRPO example config")
+    _validate_stop_after_step(args)
     output = args.output.expanduser().resolve()
     if output.exists():
         if not output.is_dir():
@@ -281,6 +401,8 @@ def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
         raise SystemExit("--logger swanlab requires SWANLAB_API_KEY")
 
     environment = dict(os.environ)
+    if args.stop_after_step is not None:
+        environment["SHOPPING_GRPO_ACTOR_CHECKPOINT_ASYNC_SAVE"] = "false"
     environment.update(
         {
             "PYTHONPATH": str(ROOT / "src"),
@@ -300,6 +422,8 @@ def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
             "GRPO_CONFIG_NAME": config.stem,
         }
     )
+    if args.stop_after_step is not None:
+        environment["SHOPPING_GRPO_STOP_AFTER_STEP"] = str(args.stop_after_step)
     if args.logger == "swanlab":
         environment.update(
             {
@@ -338,6 +462,47 @@ def _ensure_no_secrets(manifest: dict) -> None:
     from shopping_grpo.training.sft.run_manifest import ensure_no_secrets
 
     ensure_no_secrets(manifest)
+
+
+def resolve_manifest_output(
+    recorded_output: object, manifest_path: Path, model: Path
+) -> Path | None:
+    """Resolve a merge manifest output without trusting the caller's cwd.
+
+    Older merge manifests stored a project-relative output such as
+    ``outputs/models/process-sft-merged``.  Resolve those paths against the
+    non-root ancestors of the manifest/model, and accept only one candidate
+    that resolves exactly to the already-resolved model path.  Reject ``..``
+    traversal and ambiguous/no-match roots fail-closed.
+    """
+    if not isinstance(recorded_output, str) or not recorded_output.strip():
+        return None
+    recorded = Path(recorded_output).expanduser()
+    if recorded.is_absolute():
+        return recorded.resolve()
+    if ".." in recorded.parts:
+        return None
+
+    model = Path(model).expanduser().resolve()
+    roots: list[Path] = []
+    for start in (Path(manifest_path).parent, model.parent):
+        for root in (start, *start.parents):
+            resolved_root = root.resolve()
+            if resolved_root == Path(resolved_root.anchor):
+                continue
+            if resolved_root not in roots:
+                roots.append(resolved_root)
+
+    matches: list[Path] = []
+    for root in roots:
+        candidate = (root / recorded).resolve()
+        if not candidate.is_relative_to(root):
+            continue
+        if candidate == model:
+            matches.append(candidate)
+    if len(matches) != 1:
+        return None
+    return matches[0]
 
 
 def base_model_identity_matches(actual: object, expected: str) -> bool:
@@ -417,7 +582,8 @@ def validate_merged_model(
             f"{manifest_path} does not record its output directory; "
             "re-merge with scripts/merge_lora_adapter.py"
         )
-    if Path(str(recorded_output)).expanduser().resolve() != model:
+    resolved_recorded_output = resolve_manifest_output(recorded_output, manifest_path, model)
+    if resolved_recorded_output != model:
         raise SystemExit(
             f"{manifest_path} records output {recorded_output!r} which is not {model}; "
             "refusing to trust a manifest that describes a different checkpoint"
@@ -1068,13 +1234,24 @@ def build_grpo_run_manifest(
             "experiment_name": args.experiment_name,
             "smoke": bool(args.smoke),
             "smoke_steps": int(args.smoke_steps) if args.smoke else None,
-            "resume": bool(args.resume),
-            "resume_from": str(args.resume_from) if args.resume_from else None,
+            # ``--resume-from`` is a resume operation too; keep the boolean
+            # aligned with the actual trainer overrides and preserve the
+            # explicit checkpoint path in ``resume_from`` below.
+            "resume": _is_resuming(args),
+            "resume_from": (
+                str(Path(args.resume_from).expanduser().resolve())
+                if args.resume_from
+                else None
+            ),
             "expected_base_model": str(args.expected_base_model),
             "expected_model_revision": str(args.expected_model_revision),
             "allow_unverified_revision": bool(args.allow_unverified_revision),
             "resume_expected_files": list(args.resume_expected_file or []),
             "resolved_config_dump": not bool(args.no_dump_resolved_config),
+            "stop_after_step": (
+                int(args.stop_after_step) if args.stop_after_step is not None else None
+            ),
+            "actor_checkpoint_async_save": _actor_checkpoint_async_save_evidence(args),
         },
         "resolved_config": {
             "status": "pending",
@@ -1091,6 +1268,7 @@ def build_grpo_run_manifest(
         "execution": {
             "launched_at_epoch_s": int(time.time()),
             "dry_run": bool(args.dry_run),
+            "controlled_stop_after_checkpoint": False,
         },
     }
     if preflight_result.get("resume"):
@@ -1153,6 +1331,20 @@ def main() -> None:
     print(f"GRPO run manifest written: {run_manifest_path}")
 
     status = subprocess.call(command, cwd=ROOT, env=environment)
+    controlled_stop_marker = output / "controlled_stop_after_checkpoint.json"
+    if controlled_stop_marker.is_file():
+        try:
+            marker = json.loads(controlled_stop_marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(
+                f"controlled stop marker is unreadable: {controlled_stop_marker}: {exc}"
+            ) from exc
+        run_manifest["execution"]["controlled_stop_after_checkpoint"] = marker
+        run_manifest["execution"]["controlled_stop_marker"] = str(controlled_stop_marker)
+        run_manifest_path.write_text(
+            json.dumps(run_manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     # post-run：扫描 output 下的 checkpoint 产物并写 checkpoint_manifest.json。
     checkpoint_manifest = build_checkpoint_manifest(output, exit_code=status)
     checkpoint_manifest_path = output / CHECKPOINT_MANIFEST_FILE

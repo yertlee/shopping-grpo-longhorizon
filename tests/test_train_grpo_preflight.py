@@ -307,6 +307,47 @@ class GrpoPreflightTest(unittest.TestCase):
             self.assertEqual(manifest["versions"]["system_prompt_sha256"], SYSTEM_PROMPT_SHA256)
             self.assertTrue(manifest["versions"]["runtime_contract_path"])
 
+    def test_v5_entropy_off_override_is_recorded_before_smoke_budget(self):
+        """V5 changes only actor entropy at runtime; the canonical config stays diagnostic-on."""
+        self.assertIn(
+            "calculate_entropy: true",
+            (ROOT / "configs/grpo.yaml").read_text(encoding="utf-8"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = _make_args(
+                Path(tmp),
+                smoke=True,
+                smoke_steps=1,
+                hydra_overrides=[
+                    "--",
+                    "actor_rollout_ref.actor.calculate_entropy=false",
+                ],
+            )
+            args = _parse(argv)
+            command, environment = build_command(args)
+            overrides = hydra_overrides(args)
+            entropy_override = "actor_rollout_ref.actor.calculate_entropy=false"
+            self.assertIn(entropy_override, overrides)
+            self.assertLess(
+                overrides.index(entropy_override),
+                overrides.index("trainer.total_training_steps=1"),
+            )
+
+            manifest = build_grpo_run_manifest(
+                args, command, environment, preflight(args)
+            )
+            self.assertIn(entropy_override, manifest["hydra_overrides"])
+            self.assertTrue(manifest["recipe"]["resolved_config_dump"])
+
+    def test_stop_manifest_records_synchronous_actor_checkpoint_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = _parse(_make_args(Path(tmp), stop_after_step=100))
+            command, environment = build_command(args)
+            manifest = build_grpo_run_manifest(args, command, environment, preflight(args))
+            evidence = manifest["recipe"]["actor_checkpoint_async_save"]
+            self.assertFalse(evidence["value"])
+            self.assertEqual(environment["SHOPPING_GRPO_ACTOR_CHECKPOINT_ASYNC_SAVE"], "false")
+
     def test_metadata_schema_constant_is_shared_with_builder(self):
         """回归（audit item 8）：launcher 与构建器共用同一 metadata schema 常量。"""
         self.assertIs(train_grpo.DATA_METADATA_SCHEMA, METADATA_SCHEMA)
@@ -421,6 +462,43 @@ class GrpoPreflightTest(unittest.TestCase):
                 model=_write_fake_merged_model(Path(tmp), output_override="/elsewhere/model"),
             )
             args = _parse(argv)
+            with self.assertRaises(SystemExit) as ctx:
+                preflight(args)
+            self.assertIn("records output", str(ctx.exception))
+
+    def test_relative_merge_manifest_output_resolves_from_project_ancestor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            model = _write_fake_merged_model(
+                project / "outputs" / "models",
+                output_override="outputs/models/model",
+            )
+            args = _parse(_make_args(Path(tmp), model=model))
+            result = preflight(args)
+            self.assertEqual(result["model"]["verification_passed"], True)
+
+    def test_relative_merge_manifest_output_different_path_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = _write_fake_merged_model(Path(tmp), output_override="other-model")
+            args = _parse(_make_args(Path(tmp), model=model))
+            with self.assertRaises(SystemExit) as ctx:
+                preflight(args)
+            self.assertIn("records output", str(ctx.exception))
+
+    def test_relative_merge_manifest_output_traversal_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = _write_fake_merged_model(Path(tmp), output_override="../model")
+            args = _parse(_make_args(Path(tmp), model=model))
+            with self.assertRaises(SystemExit) as ctx:
+                preflight(args)
+            self.assertIn("records output", str(ctx.exception))
+
+    def test_relative_merge_manifest_output_ambiguous_root_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = _write_fake_merged_model(
+                Path(tmp), output_override="outputs/models/model"
+            )
+            args = _parse(_make_args(Path(tmp), model=model))
             with self.assertRaises(SystemExit) as ctx:
                 preflight(args)
             self.assertIn("records output", str(ctx.exception))
@@ -574,6 +652,26 @@ class GrpoResumeTest(unittest.TestCase):
             self.assertEqual(result["resume"]["checkpoint"]["global_step"], 3)
             self.assertEqual(result["resume"]["tracker_step"], 3)
             self.assertEqual(len(result["resume"]["checkpoint"]["matched_artifacts"]), 3)
+
+    def test_resume_from_records_resume_true_and_explicit_checkpoint_path(self):
+        """Regression: --resume-from must not be serialized as a fresh run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fresh_argv = _make_args(Path(tmp))
+            self._write_prior_run_manifest(Path(tmp), _parse(fresh_argv))
+            output = Path(_parse(fresh_argv).output)
+            checkpoint = output / "global_step_3"
+            args = _parse(fresh_argv + ["--resume-from", str(checkpoint)])
+
+            result = preflight(args)
+            command, environment = build_command(args)
+            manifest = build_grpo_run_manifest(args, command, environment, result)
+
+            self.assertEqual(manifest["stage"], "resume")
+            self.assertTrue(manifest["recipe"]["resume"])
+            self.assertEqual(manifest["recipe"]["resume_from"], str(checkpoint))
+            self.assertEqual(
+                manifest["resume"]["checkpoint"]["path"], str(checkpoint)
+            )
 
     def test_resume_rejects_contract_drift(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1075,7 +1173,15 @@ class VerlPatchHelperTest(unittest.TestCase):
     def _fake_patch_program(target: Path, marker: str) -> None:
         # fake 'patch' 可执行文件：把 marker 以合法 Python 注释追加到目标文件。
         text = target.read_text(encoding="utf-8")
-        target.write_text(text + f"# {marker}\n", encoding="utf-8")
+        target.write_text(
+            text
+            + f"# {marker}\n"
+            + f"# {patcher.STEP_BARRIER_MARKER}\n"
+            + "def _barrier_probe(self):\n"
+            + "    if should_controlled_stop():\n"
+            + "        return\n",
+            encoding="utf-8",
+        )
 
     def test_apply_restore_chain_with_unknown_hash_rejection(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1083,7 +1189,13 @@ class VerlPatchHelperTest(unittest.TestCase):
             original.write_text(self.ORIGINAL_BODY, encoding="utf-8")
             patched = Path(tmp) / "expected_patched.py"
             patched.write_text(
-                self.ORIGINAL_BODY + f"# {patcher.PATCH_MARKER}\n", encoding="utf-8"
+                self.ORIGINAL_BODY
+                + f"# {patcher.PATCH_MARKER}\n"
+                + f"# {patcher.STEP_BARRIER_MARKER}\n"
+                + "def _barrier_probe(self):\n"
+                + "    if should_controlled_stop():\n"
+                + "        return\n",
+                encoding="utf-8",
             )
             self._install_fake_hashes(original, patched)
 

@@ -1,21 +1,43 @@
+diff --git a/verl/trainer/ppo/ray_trainer.py b/verl/trainer/ppo/ray_trainer.py
+index d1eaa7b..16af0bd 100644
 --- a/verl/trainer/ppo/ray_trainer.py
 +++ b/verl/trainer/ppo/ray_trainer.py
-@@ -20,0 +21,2 @@
-+# SHOPPING_GRPO_DYNAMIC_SAMPLING_PATCH_V3
-+
-@@ -1380,0 +1383,8 @@
-+        )
-+
+@@ -17,7 +17,7 @@
+ PPO Trainer with Ray-based single controller.
+ This trainer supports model-agonistic model initialization with huggingface
+ """
+-
++# SHOPPING_GRPO_DYNAMIC_SAMPLING_PATCH_V4
+ import json
+ import os
+ import uuid
+@@ -1379,9 +1379,89 @@ class RayPPOTrainer:
+             default_backend=self.config.trainer.logger,
+             config=OmegaConf.to_container(self.config, resolve=True),
+         )
+-
 +        from shopping_grpo.training.grpo.dynamic_sampling import (
 +            aggregate_shopping_metrics,
 +            append_training_diagnostic,
++            record_actor_batch_pre_update,
 +            build_rollout_diagnostics,
 +            extract_shopping_group_signals,
 +            select_reward_varying_groups,
-@@ -1381,0 +1392,64 @@
-+
++            parse_stop_after_step,
++            validate_stop_after_step,
++            should_controlled_stop,
++            record_controlled_stop_after_checkpoint,
++        )
 +        diagnostics_path = os.environ.get("SHOPPING_GRPO_DIAGNOSTICS_PATH")
-+
++        # SHOPPING_GRPO_STEP_BARRIER_V1
++        stop_after_step = validate_stop_after_step(
++            parse_stop_after_step(os.environ.get("SHOPPING_GRPO_STOP_AFTER_STEP")),
++            int(self.config.trainer.save_freq),
++        )
++        stop_marker_path = os.path.join(
++            os.environ.get("GRPO_OUTPUT_DIR", "."),
++            "controlled_stop_after_checkpoint.json",
++        )
 +        dynamic_sampling_config = self.config.get("shopping_dynamic_sampling", {})
 +        dynamic_sampling_enabled = bool(dynamic_sampling_config.get("enable", False))
 +        if dynamic_sampling_enabled:
@@ -46,7 +68,6 @@
 +                raise ValueError("shopping_dynamic_sampling requires rollout-log-prob bypass mode")
 +            if not self.config.actor_rollout_ref.rollout.calculate_log_probs:
 +                raise ValueError("shopping_dynamic_sampling requires rollout.calculate_log_probs=true")
-+
 +            dynamic_target_prompts = int(self.config.data.train_batch_size)
 +            dynamic_rollout_n = int(self.config.actor_rollout_ref.rollout.n)
 +            dynamic_accepted_batches = []
@@ -77,34 +98,94 @@
 +                    sort_keys=True,
 +                )
 +            )
-@@ -1409,2 +1483,4 @@
+         self.global_steps = 0
+-
+         # load checkpoint and update weights before doing anything
+         self._load_checkpoint()
+         self.checkpoint_manager.update_weights(self.global_steps)
+@@ -1402,25 +1482,26 @@ class RayPPOTrainer:
+         if self.config.actor_rollout_ref.rollout.skip.get("enable", False):
+             rollout_skip = RolloutSkip(self.config, self.async_rollout_manager)
+             rollout_skip.wrap_generate_sequences()
+-
+         # add tqdm
+         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
+-
 -        # we start from step 1
 -        self.global_steps += 1
 +        # The unpatched trainer uses a one-based in-flight step. Dynamic sampling
 +        # keeps the committed counter unchanged until an optimizer update occurs.
 +        if not dynamic_sampling_enabled:
 +            self.global_steps += 1
-@@ -1414,0 +1491 @@
+         last_val_metrics = None
+         self.max_steps_duration = 0
+-
+         prev_step_profile = False
 +        first_step = self.global_steps + 1 if dynamic_sampling_enabled else self.global_steps
-@@ -1416 +1493 @@
+         curr_step_profile = (
 -            self.global_steps in self.config.global_profiler.steps
 +            first_step in self.config.global_profiler.steps
-@@ -1423,0 +1501,2 @@
+             if self.config.global_profiler.steps is not None
+             else False
+         )
+         next_step_profile = False
+-
+         for epoch in range(current_epoch, self.config.trainer.total_epochs):
+             for batch_dict in self.train_dataloader:
 +                current_step = self.global_steps + 1 if dynamic_sampling_enabled else self.global_steps
 +                optimizer_updated = False
-@@ -1446 +1525 @@
+                 if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
+                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
+                 metrics = {}
+@@ -1439,14 +1520,11 @@ class RayPPOTrainer:
+                 batch.non_tensor_batch["uid"] = np.array(
+                     [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
+                 )
+-
+                 gen_batch = self._get_gen_batch(batch)
+-
+                 # pass global_steps to trace
 -                gen_batch.meta_info["global_steps"] = self.global_steps
 +                gen_batch.meta_info["global_steps"] = current_step
-@@ -1464 +1543 @@
+                 rollout_n = self.config.actor_rollout_ref.rollout.n
+                 gen_batch_output = gen_batch.repeat(repeat_times=rollout_n, interleave=True)
+-
+                 if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
+                     # NOTE: REMAX needs one sampled rollout plus one greedy baseline per prompt.
+                     # Keep them in a single agent-loop/vLLM request to avoid sending a second
+@@ -1460,21 +1538,19 @@ class RayPPOTrainer:
+                 else:
+                     combined_gen_batch = gen_batch_output
+                     num_sampled_prompts = len(gen_batch_output)
+-
 -                is_last_step = self.global_steps >= self.total_training_steps
 +                is_last_step = current_step >= self.total_training_steps
-@@ -1471 +1550,2 @@
+                 with marked_timer("step", timing_raw):
+                     # generate a batch
+                     with marked_timer("gen", timing_raw, color="red"):
+                         if curr_step_profile:
+                             self.llm_server_manager.start_profile()
+                         combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
 -                        self.checkpoint_manager.sleep_replicas()
 +                        if not dynamic_sampling_enabled:
 +                            self.checkpoint_manager.sleep_replicas()
-@@ -1524,0 +1605,214 @@
-+                        reward_tensor, reward_extra_infos_dict = extract_reward(batch)
-+
+                         if curr_step_profile:
+                             self.llm_server_manager.stop_profile()
+-
+                         timing_raw.update(combined_gen_output.meta_info["timing"])
+                         combined_gen_output.meta_info.pop("timing", None)
+-
+                     gen_batch_output = combined_gen_output.slice(0, num_sampled_prompts)
+                     if "__do_sample__" in gen_batch_output.non_tensor_batch:
+                         gen_batch_output.pop(non_tensor_batch_keys=["__do_sample__"])
+@@ -1520,10 +1596,333 @@ class RayPPOTrainer:
+                         if self.use_rm and "rm_scores" not in batch.batch.keys():
+                             batch_reward = self._compute_reward_colocate(batch)
+                             batch = batch.union(batch_reward)
+-
+                         # extract reward_tensor and reward_extra_infos_dict for training
+                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+-
 +                    if dynamic_sampling_enabled:
 +                        seq_rewards = reward_tensor.sum(dim=-1).detach().cpu().tolist()
 +                        batch_uids = batch.non_tensor_batch["uid"].tolist()
@@ -132,7 +213,6 @@
 +                                "shopping dynamic sampling found uid groups whose sizes do not match "
 +                                f"rollout.n={dynamic_rollout_n}: {invalid_group_sizes}"
 +                            )
-+
 +                        dynamic_num_gen_batches += 1
 +                        dynamic_generated_groups += group_stats["num_groups"]
 +                        dynamic_filtered_groups += group_stats["dropped_group_count"]
@@ -195,7 +275,6 @@
 +                            accepted_batch.meta_info.pop("images_seqlens", None)
 +                            dynamic_accepted_batches.append(accepted_batch)
 +                            dynamic_accepted_prompts += len(accepted_uids)
-+
 +                        if dynamic_accepted_prompts < dynamic_target_prompts:
 +                            if curr_step_profile:
 +                                self._stop_profiling(True)
@@ -304,8 +383,8 @@
 +                                        "no-signal run"
 +                                    )
 +                            continue
-+
 +                        batch = DataProto.concat(dynamic_accepted_batches)
++                        record_actor_batch_pre_update(batch, diagnostics_path, current_step)
 +                        if self.config.trainer.balance_batch:
 +                            self._balance_batch(batch, metrics=metrics)
 +                        batch.meta_info["global_token_num"] = torch.sum(
@@ -317,7 +396,7 @@
 +                                continue
 +                            images_seqlens_all.extend(multi_modal_input["images_seqlens"].tolist())
 +                        batch.meta_info["images_seqlens"] = images_seqlens_all
-@@ -1525,0 +1820,70 @@
++                        reward_tensor, reward_extra_infos_dict = extract_reward(batch)
 +                        metrics.update(
 +                            {
 +                                "group/generated": dynamic_generated_groups,
@@ -388,7 +467,6 @@
 +                        dynamic_no_purchase_success_groups = 0
 +                        dynamic_sampling_invalid_groups = 0
 +                        dynamic_generated_trajectories = 0
-@@ -1526,0 +1891,45 @@
 +                    if "shopping" not in batch.non_tensor_batch:
 +                        raise RuntimeError(
 +                            "Shopping GRPO requires AgentLoop shopping diagnostics"
@@ -433,35 +511,85 @@
 +                                "rollout/generated_total": group_stats["num_trajectories"],
 +                            }
 +                        )
-+
-@@ -1643 +2052 @@
+                     # Operating Mode Selection:
+                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
+                     # - Decoupled mode: Recomputes old_log_probs as proximal anchor (3 policies: π_rollout, π_old, π_θ)
+@@ -1638,16 +2037,17 @@ class RayPPOTrainer:
+                             critic_output = self._update_critic(batch)
+                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
+                         metrics.update(critic_output_metrics)
+-
+                     # implement critic warmup
 -                    if self.config.trainer.critic_warmup > self.global_steps:
 +                    if self.config.trainer.critic_warmup > current_step:
-@@ -1645 +2054 @@
+                         # Still in critic warmup, only update weights to wake up rollout replicas.
 -                        self.checkpoint_manager.update_weights(self.global_steps)
 +                        self.checkpoint_manager.update_weights(current_step)
-@@ -1649,0 +2059,3 @@
+                     else:
+                         # update actor
+                         with marked_timer("update_actor", timing_raw, color="red"):
+                             actor_output = self._update_actor(batch)
+-
 +                        optimizer_updated = True
 +                        if dynamic_sampling_enabled:
 +                            self.global_steps = current_step
-@@ -1665 +2077 @@
+                         # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
+                         esi_close_to_expiration = should_save_ckpt_esi(
+                             max_steps_duration=self.max_steps_duration,
+@@ -1662,39 +2062,34 @@ class RayPPOTrainer:
+                         # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
+                         if self.config.trainer.save_freq > 0 and (
+                             is_last_step
 -                            or self.global_steps % self.config.trainer.save_freq == 0
 +                            or current_step % self.config.trainer.save_freq == 0
-@@ -1675 +2087 @@
+                             or esi_close_to_expiration
+                         ):
+                             if esi_close_to_expiration:
+                                 print("Force saving checkpoint: ESI instance expiration approaching.")
+                             with marked_timer("save_checkpoint", timing_raw, color="green"):
+                                 self._save_checkpoint()
+-
+                         # update weights from trainer to rollout
+                         with marked_timer("update_weights", timing_raw, color="red"):
 -                            self.checkpoint_manager.update_weights(self.global_steps)
+-
 +                            self.checkpoint_manager.update_weights(current_step)
-@@ -1687 +2099 @@
+                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+                         metrics.update(actor_output_metrics)
+-
+                     # Log rollout generations if enabled
+                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
+                     if rollout_data_dir:
+                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
+-
+                 # validate
+                 if self.config.trainer.test_freq > 0 and (
 -                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
 +                    is_last_step or current_step % self.config.trainer.test_freq == 0
-@@ -1697 +2109 @@
+                 ):
+                     with marked_timer("testing", timing_raw, color="green"):
+                         val_metrics: dict = self._validate()
+                         if is_last_step:
+                             last_val_metrics = val_metrics
+                     metrics.update(val_metrics)
+-
+                 with marked_timer("stop_profile", timing_raw):
+                     next_step_profile = (
 -                        self.global_steps + 1 in self.config.global_profiler.steps
 +                        current_step + 1 in self.config.global_profiler.steps
-@@ -1715 +2127 @@
+                         if self.config.global_profiler.steps is not None
+                         else False
+                     )
+@@ -1712,10 +2107,23 @@ class RayPPOTrainer:
+                 # training metrics
+                 metrics.update(
+                     {
 -                        "training/global_step": self.global_steps,
 +                        "training/global_step": current_step,
-@@ -1716,0 +2129 @@
+                         "training/epoch": epoch,
 +                        "training/optimizer_updated": int(optimizer_updated),
-@@ -1718,0 +2132,12 @@
+                     }
+                 )
 +                if dynamic_sampling_enabled:
 +                    metrics.update(
 +                        {
@@ -474,8 +602,17 @@
 +                            ),
 +                        }
 +                    )
-@@ -1750 +2175,11 @@
+                 # collect metrics
+                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                 # GDPO per-component reward metrics
+@@ -1745,13 +2153,42 @@ class RayPPOTrainer:
+                         batch.non_tensor_batch.get("spec_num_verify_steps", None),
+                     )
+                 )
+-
+                 # TODO: make a canonical logger that supports various backend
 -                logger.log(data=metrics, step=self.global_steps)
+-
 +                append_training_diagnostic(
 +                    diagnostics_path,
 +                    "optimizer_step",
@@ -487,11 +624,32 @@
 +                    ),
 +                )
 +                logger.log(data=metrics, step=current_step)
-@@ -1753 +2188,6 @@
+                 progress_bar.update(1)
 -                self.global_steps += 1
+-
 +                if dynamic_sampling_enabled and not optimizer_updated:
 +                    raise RuntimeError(
 +                        "shopping dynamic sampling reached logging without an actor optimizer update"
 +                    )
 +                if not dynamic_sampling_enabled:
 +                    self.global_steps += 1
++                if should_controlled_stop(
++                    target_step=stop_after_step,
++                    current_step=current_step,
++                    optimizer_updated=optimizer_updated,
++                    save_freq=int(self.config.trainer.save_freq),
++                ):
++                    # The synchronous save block above ran at this exact save boundary.
++                    record_controlled_stop_after_checkpoint(
++                        stop_marker_path,
++                        diagnostics_path,
++                        global_step=current_step,
++                        target_step=stop_after_step,
++                        save_freq=int(self.config.trainer.save_freq),
++                    )
++                    if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
++                        self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
++                    return
+                 if is_last_step:
+                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
+                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
