@@ -71,6 +71,12 @@ from shopping_grpo.evaluation.rubric import (
     materialize_rubric_bundle,
     stable_hash,
 )
+from shopping_grpo.evaluation.runtime_contract import (
+    ValidatedRuntimeContract,
+    canonical_json_bytes,
+    revalidate_runtime_contract_source,
+    thaw_runtime_value,
+)
 from shopping_grpo.evaluation.trajectory import (
     NORMALIZED_TRAJECTORY_VERSION,
     normalize_trajectory,
@@ -78,6 +84,7 @@ from shopping_grpo.evaluation.trajectory import (
 
 
 DRIVER_VERSION = "shopping-evaluation-driver-v1"
+PROTOCOL_SCHEMA_VERSION = "shopping-evaluation-protocol-v1"
 DEV_SPLIT = "dev"
 FINAL_SPLIT = "final-200"
 SUPPORTED_SPLITS = (DEV_SPLIT, FINAL_SPLIT)
@@ -91,6 +98,19 @@ JUDGE_FAILURE_REASON = "other"
 # cache 记录绑定的 schema：每条 trajectory/normalized/metrics/judge 记录都携带
 # task_id + trajectory_id + schema_version + 输入内容 hash，resume 时逐条验证。
 CACHE_BINDING_VERSION = "shopping-evaluation-cache-binding-v1"
+
+# The actor protocol is an exact projection of the frozen contract.  Keep the
+# whitelist here so callers cannot smuggle unrelated fields into the hash or
+# silently omit a budget used by the rollout client.
+ACTOR_PROTOCOL_CONTRACT_FIELDS = {
+    "actor_max_tokens": "max_generated_tokens_per_turn",
+    "actor_context_window": "context_window",
+    "actor_context_safety_margin": "context_safety_margin",
+    "actor_observation_token_budget": "observation_search_tokens",
+    "actor_observation_detail_token_budget": "observation_detail_tokens",
+    "actor_observation_generic_token_budget": "observation_generic_tokens",
+    "actor_observation_search_top_k": "observation_search_top_k",
+}
 
 
 def _is_infrastructure_exception(exc: BaseException, type_names) -> bool:
@@ -453,6 +473,7 @@ class EvaluationDriver:
         curator_model="unknown-curator",
         rubric_version=DEFAULT_RUBRIC_VERSION,
         actor_protocol=None,
+        runtime_contract=None,
         shared_rubric_cache=None,
         tool_schemas=None,
         resume=False,
@@ -504,9 +525,75 @@ class EvaluationDriver:
         self.judge_model = str(judge_model)
         self.curator_model = str(curator_model)
         self.rubric_version = str(rubric_version)
-        self.actor_protocol = dict(actor_protocol or {})
+        # 正式 driver 必须绑定集中式、带受信 source_path 的冻结合同。
+        if not isinstance(runtime_contract, ValidatedRuntimeContract):
+            raise DriverError(
+                "runtime_contract 必须是 ValidatedRuntimeContract（由集中式验证器加载），"
+                f"got {type(runtime_contract).__name__}；拒绝任意 dict 注入伪合同"
+            )
+        self.runtime_contract = runtime_contract
+        # Re-read the source on every formal construction.  This catches both
+        # hand-built ValidatedRuntimeContract instances and edits after load.
+        from shopping_grpo.evaluation.runtime_contract import (
+            RuntimeContractError,
+            verify_runtime_code_against_contract,
+        )
+
+        try:
+            revalidate_runtime_contract_source(runtime_contract)
+            verify_runtime_code_against_contract(runtime_contract)
+        except RuntimeContractError as exc:
+            raise DriverError(
+                f"运行时合同 source/代码交叉验证失败，拒绝启动：{exc}"
+            ) from exc
+        # 指令书 §4.8：driver 的运行参数必须与合同一致，冲突即失败。
+        contract = runtime_contract.contract
+        if str(self.environment_version) != str(contract.get("environment_version")):
+            raise DriverError(
+                "environment_version 与冻结合同不一致："
+                f"driver={self.environment_version} contract={contract.get('environment_version')}"
+            )
+        if int(self.max_steps) != int(contract.get("max_steps")):
+            raise DriverError(
+                "max_steps 与冻结合同不一致："
+                f"driver={self.max_steps} contract={contract.get('max_steps')}"
+            )
+
+        if not isinstance(actor_protocol, Mapping):
+            raise DriverError(
+                "actor_protocol 必须是包含全部冻结 actor 字段的 Mapping；禁止缺失"
+            )
+        actor_keys = set(actor_protocol)
+        expected_keys = set(ACTOR_PROTOCOL_CONTRACT_FIELDS)
+        missing = sorted(expected_keys - actor_keys)
+        extra = sorted(actor_keys - expected_keys, key=str)
+        if missing or extra:
+            raise DriverError(
+                "actor_protocol 字段必须严格匹配冻结白名单："
+                f"missing={missing} extra={extra}"
+            )
+        for actor_key, contract_key in ACTOR_PROTOCOL_CONTRACT_FIELDS.items():
+            actual = actor_protocol[actor_key]
+            expected = contract[contract_key]
+            if type(actual) is not type(expected) or actual != expected:
+                raise DriverError(
+                    "actor_protocol 与冻结合同不一致："
+                    f"{actor_key}={actual!r} contract[{contract_key}]={expected!r}"
+                )
+        from types import MappingProxyType
+
+        self.actor_protocol = MappingProxyType(dict(actor_protocol))
         self.shared_rubric_cache = Path(shared_rubric_cache) if shared_rubric_cache else None
-        self.tool_schemas = list(tool_schemas) if tool_schemas else None
+        # A contract-bound run always uses the actual repository schemas.  An
+        # injected same-hash object is still rejected because it could be
+        # mutated after validation and is not the runtime source of truth.
+        if tool_schemas is not None:
+            raise DriverError(
+                "runtime_contract 已绑定时禁止注入 tool_schemas；必须使用实际 SHOP_TOOL_SCHEMAS"
+            )
+        from shopping_grpo.environment.tools import SHOP_TOOL_SCHEMAS
+
+        self.tool_schemas = SHOP_TOOL_SCHEMAS
         self.resume = bool(resume)
         self.allow_blind_final = bool(allow_blind_final)
         self.created_at = created_at
@@ -598,32 +685,151 @@ class EvaluationDriver:
         except Exception as exc:
             raise BlindFinalGuardError(f"blind guard 拒绝该分割：{exc}") from exc
 
-    def _compute_protocol_hash(self) -> str:
-        """统一协议 hash：四模型必须共享同一 task 顺序、prompt、tool schema 与上限。"""
+    def _projection_code_sha256(self) -> str:
+        """observation projection 的代码 hash；模块缺失/不可读必须抛错，严禁返回 None。"""
+        import hashlib
+
+        try:
+            from shopping_grpo.environment import projection as projection_module
+
+            return hashlib.sha256(
+                Path(projection_module.__file__).resolve().read_bytes()
+            ).hexdigest()
+        except Exception as exc:  # noqa: BLE001 - 校验失败必须变成明确异常
+            raise DriverError(
+                f"observation projection 模块路径缺失/不可读，无法计算代码 hash：{exc}"
+            ) from exc
+
+    def _protocol_payload(self) -> dict:
+        """协议 payload（不含 protocol_hash）；manifest 与 resume 都以它为准。
+
+        单源构造：协议身份 = SHA256(canonical_json_bytes(payload))。tool schema
+        使用 canonical 口径（与 contract["tool_schema_hash"] 一致），不再用
+        rubric 的 stable_hash 清洗口径。
+        """
+        import hashlib
+
+        from shopping_grpo.evaluation.rollout import SYSTEM_PROMPT
+        from shopping_grpo.environment.projection import PROJECTION_CONTRACT_VERSION
 
         schemas = self.tool_schemas
         if schemas is None:
             from shopping_grpo.environment.tools import SHOP_TOOL_SCHEMAS
 
             schemas = SHOP_TOOL_SCHEMAS
-        return stable_hash(
-            {
-                "driver_version": DRIVER_VERSION,
-                "evaluation_contract": CONTRACT_VERSION,
-                "environment_version": self.environment_version,
-                "tool_schema_hash": stable_hash(schemas),
-                "max_steps": self.max_steps,
-                "temperature": self.temperature,
-                "top_p": self.top_p,
-                "rubric_version": self.rubric_version,
-                "curator_model": self.curator_model,
-                "judge_model": self.judge_model,
-                "curator_prompt_version": RUBRIC_CURATOR_PROMPT_VERSION,
-                "judge_prompt_version": TRAJECTORY_JUDGE_PROMPT_VERSION,
-                "extractor_version": RUBRIC_EXTRACTOR_VERSION,
-                "actor_protocol": self.actor_protocol,
+        contract = self.runtime_contract
+        contract_block = None
+        if contract is not None:
+            contract_block = {
+                "payload": thaw_runtime_value(contract.canonical_payload),
+                "declared_sha256": contract.declared_sha256,
+                "canonical_sha256": contract.canonical_sha256,
+                "file_sha256": contract.file_sha256,
             }
-        )
+        c = contract.contract if contract is not None else {}
+        return {
+            "protocol_schema_version": PROTOCOL_SCHEMA_VERSION,
+            "driver_version": DRIVER_VERSION,
+            "evaluation_contract": CONTRACT_VERSION,
+            "environment_version": self.environment_version,
+            "tool_schema_sha256": hashlib.sha256(
+                canonical_json_bytes(schemas)
+            ).hexdigest(),
+            "system_prompt_sha256": hashlib.sha256(
+                SYSTEM_PROMPT.encode("utf-8")
+            ).hexdigest(),
+            "observation_projection_contract_version": PROJECTION_CONTRACT_VERSION,
+            "observation_projection_code_sha256": self._projection_code_sha256(),
+            "reward_version": c.get("reward_version"),
+            "max_steps": self.max_steps,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "context_window": c.get("context_window"),
+            "context_safety_margin": c.get("context_safety_margin"),
+            "max_generated_tokens_per_turn": c.get("max_generated_tokens_per_turn"),
+            "observation_search_tokens": c.get("observation_search_tokens"),
+            "observation_detail_tokens": c.get("observation_detail_tokens"),
+            "observation_generic_tokens": c.get("observation_generic_tokens"),
+            "observation_search_top_k": c.get("observation_search_top_k"),
+            "rubric_version": self.rubric_version,
+            "curator_model": self.curator_model,
+            "judge_model": self.judge_model,
+            "runtime_contract": contract_block,
+            "actor_protocol": dict(self.actor_protocol),
+        }
+
+    def _protocol_manifest_block(self) -> dict:
+        """``{protocol_hash: hash(payload), **payload}``；初始/最终 manifest 与 resume 同源。"""
+        import hashlib
+
+        payload = self._protocol_payload()
+        return {
+            "protocol_hash": hashlib.sha256(canonical_json_bytes(payload)).hexdigest(),
+            **payload,
+        }
+
+    def _compute_protocol_hash(self) -> str:
+        """协议身份 = SHA256(canonical_json_bytes(payload))；单源兼容入口。"""
+        return self._protocol_manifest_block()["protocol_hash"]
+
+    def _validate_resume_protocol(self, manifest: dict) -> None:
+        """指令书 §7：resume 前验证 manifest 的协议块自洽且与当前完全一致。
+
+        顺序：object 检查 → 分离 stored hash 与 payload → 独立重算 == stored →
+        payload == 当前 payload → contract payload 重算 → 三 hash 与当前合同一致。
+        缺字段、多字段、旧平铺布局、字段篡改、hash 篡改全部抛 ResumeContractError。
+        """
+        import hashlib
+
+        stored_block = manifest.get("protocol")
+        if not isinstance(stored_block, Mapping):
+            raise ResumeContractError(
+                "manifest protocol 块缺失或不是 object；拒绝 resume"
+            )
+        stored_hash = stored_block.get("protocol_hash")
+        stored_payload = {
+            key: value for key, value in stored_block.items() if key != "protocol_hash"
+        }
+        if not isinstance(stored_hash, str):
+            raise ResumeContractError(
+                "manifest protocol 块缺少 protocol_hash；拒绝 resume"
+            )
+        recomputed = hashlib.sha256(
+            canonical_json_bytes(stored_payload)
+        ).hexdigest()
+        if recomputed != stored_hash:
+            raise ResumeContractError(
+                "manifest protocol_hash 与自身 payload 的独立重算不一致："
+                f"stored={stored_hash} recomputed={recomputed}；拒绝 resume"
+            )
+        current = self._protocol_payload()
+        if stored_payload != current:
+            raise ResumeContractError(
+                "manifest 协议 payload 与当前协议不一致（prompt/projection/reward/"
+                "contract/actor 任一漂移）；拒绝 resume"
+            )
+        contract_block = stored_payload.get("runtime_contract")
+        if self.runtime_contract is not None:
+            if not isinstance(contract_block, Mapping):
+                raise ResumeContractError(
+                    "manifest 缺少 runtime contract 块；拒绝 resume"
+                )
+            validated = self.runtime_contract
+            expected = {
+                "payload": thaw_runtime_value(validated.canonical_payload),
+                "declared_sha256": validated.declared_sha256,
+                "canonical_sha256": validated.canonical_sha256,
+                "file_sha256": validated.file_sha256,
+            }
+            if contract_block != expected:
+                raise ResumeContractError(
+                    "manifest runtime contract 块与当前已验证合同不一致"
+                    "（declared/canonical/file hash 或 payload 漂移）；拒绝 resume"
+                )
+        elif contract_block is not None:
+            raise ResumeContractError(
+                "当前未绑定 runtime contract，但 manifest 记录了 contract 块；拒绝 resume"
+            )
 
     def _prepare_run_dir(self, task_split_sha: str) -> None:
         """拒绝覆盖现有输出；resume 时校验 manifest 中的合同 hash。"""
@@ -645,10 +851,7 @@ class EvaluationDriver:
                 raise ResumeContractError(
                     "task split sha256 does not match the original run manifest"
                 )
-            if manifest.get("protocol", {}).get("protocol_hash") != self.protocol_hash:
-                raise ResumeContractError(
-                    "protocol hash does not match the original run manifest"
-                )
+            self._validate_resume_protocol(manifest)
             # 模型身份块：label / path / revision / weights hash 必须与请求一致。
             actor_block = manifest.get("actor") or {}
             identity_expectations = {
@@ -766,16 +969,7 @@ class EvaluationDriver:
                 "environment_version": self.environment_version,
                 "env_base_url": self.base_url,
             },
-            protocol={
-                "protocol_hash": self.protocol_hash,
-                "max_steps": self.max_steps,
-                "temperature": self.temperature,
-                "top_p": self.top_p,
-                "rubric_version": self.rubric_version,
-                "curator_model": self.curator_model,
-                "judge_model": self.judge_model,
-                **self.actor_protocol,
-            },
+            protocol=self._protocol_manifest_block(),
             code={
                 "driver_version": DRIVER_VERSION,
                 "driver_module_sha256": _driver_code_hash(),
@@ -1437,16 +1631,7 @@ class EvaluationDriver:
                 "environment_version": self.environment_version,
                 "env_base_url": self.base_url,
             },
-            protocol={
-                "protocol_hash": self.protocol_hash,
-                "max_steps": self.max_steps,
-                "temperature": self.temperature,
-                "top_p": self.top_p,
-                "rubric_version": self.rubric_version,
-                "curator_model": self.curator_model,
-                "judge_model": self.judge_model,
-                **self.actor_protocol,
-            },
+            protocol=self._protocol_manifest_block(),
             code={
                 "driver_version": DRIVER_VERSION,
                 "driver_module_sha256": _driver_code_hash(),

@@ -339,6 +339,9 @@ def _synthetic_facts(task):
     )
 
 
+_UNSET_RUNTIME_CONTRACT = object()
+
+
 class Harness:
     """合成分割 + 全套 fake 依赖的 driver 装配器。"""
 
@@ -378,7 +381,25 @@ class Harness:
     def build_driver(self, run_dir, *, split="dev", resume=False,
                      allow_blind_final=False, curator=None, judge=None,
                      actor=None, env_factory=None, max_steps=35,
-                     task_split_path=None, facts_builder=None):
+                     task_split_path=None, facts_builder=None,
+                     runtime_contract=_UNSET_RUNTIME_CONTRACT, tool_schemas=None,
+                     actor_protocol=None):
+        if runtime_contract is _UNSET_RUNTIME_CONTRACT:
+            from shopping_grpo.evaluation.runtime_contract import load_and_validate_runtime_contract
+            runtime_contract = load_and_validate_runtime_contract(
+                Path(__file__).resolve().parent / "fixtures" / "runtime_contract.json"
+            )
+        if actor_protocol is None and hasattr(runtime_contract, "contract"):
+            contract = runtime_contract.contract
+            actor_protocol = {
+                "actor_max_tokens": contract["max_generated_tokens_per_turn"],
+                "actor_context_window": contract["context_window"],
+                "actor_context_safety_margin": contract["context_safety_margin"],
+                "actor_observation_token_budget": contract["observation_search_tokens"],
+                "actor_observation_detail_token_budget": contract["observation_detail_tokens"],
+                "actor_observation_generic_token_budget": contract["observation_generic_tokens"],
+                "actor_observation_search_top_k": contract["observation_search_top_k"],
+            }
         return EvaluationDriver(
             run_dir=run_dir,
             task_split_path=task_split_path or self.split_path,
@@ -396,6 +417,9 @@ class Harness:
             model_path="/models/m2-merged",
             judge_model="fake-judge",
             curator_model="fake-curator",
+            runtime_contract=runtime_contract,
+            tool_schemas=tool_schemas,
+            actor_protocol=actor_protocol,
             resume=resume,
             allow_blind_final=allow_blind_final,
         )
@@ -613,7 +637,7 @@ class EvaluationDriverTest(unittest.TestCase):
         harness = self._harness()
         run_dir = self.tmp / "run"
         harness.build_driver(run_dir).run()
-        with self.assertRaises(ResumeContractError):
+        with self.assertRaises((ResumeContractError, DriverError)):
             harness.build_driver(run_dir, resume=True, max_steps=30).run()
 
     def test_shared_rubric_cache_is_reused_across_models(self):
@@ -935,7 +959,8 @@ class EvaluateStudentCliTest(unittest.TestCase):
         self.assertEqual(args.environment_version, "shopsimulator-environment-v2.1")
         self.assertEqual(args.temperature, 0.0)
         self.assertEqual(args.top_p, 1.0)
-        self.assertEqual(args.max_steps, 35)
+        self.assertEqual(args.max_steps, 35)  # 显式传冻结值合法
+        self.assertIsNone(args.actor_max_tokens)  # 合同填充
         self.assertTrue(args.resume)
         self.assertFalse(args.allow_blind_final_after_freeze)
 
@@ -975,6 +1000,12 @@ class EvaluateStudentCliTest(unittest.TestCase):
                 json.dumps({"task_id": 1}, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
+            import shutil
+
+            from tests.test_protocol_hash_binding import FIXTURE as CONTRACT_FIXTURE
+
+            contract_path = harness_dir / "runtime_contract.json"
+            shutil.copyfile(CONTRACT_FIXTURE, contract_path)
             args = parse_args(
                 [
                     "--model-label", "m2",
@@ -983,6 +1014,7 @@ class EvaluateStudentCliTest(unittest.TestCase):
                     "--task-ids", str(split),
                     "--output", str(harness_dir / "run"),
                     "--env-base-url", "http://127.0.0.1:5700",
+                    "--runtime-contract", str(contract_path),
                 ]
             )
             driver = build_driver(
