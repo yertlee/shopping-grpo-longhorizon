@@ -9,7 +9,6 @@ import json
 import re
 from pathlib import Path
 
-
 SCHEMA_VERSION = "shopping-sft-curriculum-v1"
 STAGE_CONFIG = {
     "a": {"buckets": ["foundation"], "epochs": 1.0, "learning_rate": 1e-4},
@@ -220,7 +219,12 @@ def build_manifest(
 def parse_args() -> argparse.Namespace:
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", type=Path, default=root / "data/sft_pure_v4/all.jsonl")
+    parser.add_argument(
+        "--source",
+        type=Path,
+        required=True,
+        help="authorized Pure V4 JSONL source (not published in this repository)",
+    )
     parser.add_argument(
         "--labels", type=Path, default=root / "data/sft_pure_v4/difficulty_labels.jsonl"
     )

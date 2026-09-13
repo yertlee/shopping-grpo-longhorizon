@@ -1468,7 +1468,7 @@
     ]
   },
   "source": {
-    "path": "data/sft_pure_v4/all.jsonl",
+    "path": "authorized://commerce-v1/sft-pure-v4/all.jsonl",
     "sha256": "7b70db7174daf7660209800441c06b2502d602969881b524ff0d2a3be5fb981e"
   },
   "labels": {

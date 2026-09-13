@@ -1,3 +1,5 @@
 src/shopping_grpo/environment/projection.py -text
 src/shopping_grpo/environment/actions.py -text
+*.json text eol=lf
+*.jsonl text eol=lf
 *.sh text eol=lf

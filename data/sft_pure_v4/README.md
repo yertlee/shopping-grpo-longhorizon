@@ -1,14 +1,12 @@
 # Pure DeepSeek-v4 SFT pool
 
-This directory contains the deduplicated union of the current DeepSeek-v4
-teacher set and the new portion of the supplied `merged` package.
+The per-example Pure V4 trajectory pool is intentionally not published in
+this repository. Build it from the authorized source identified by
+`metadata.json`, then keep the derived rows in an external output directory.
 
-- `all.jsonl`: 1,192 clean, unique-task, gold-purchase trajectories.
-- `difficulty_labels.jsonl`: intrinsic task difficulty and separate observed
-  trajectory-complexity labels from `deepseek-v4-flash`.
-- `duplicate_report.json`: source, quality features, and the selected/discarded
-  row for every duplicate task.
-- `metadata.json`: counts, hashes, labeling provenance, and mix feasibility.
+- `metadata.json`: aggregate counts, hashes, labeling provenance, and mix feasibility.
+- `difficulty_labels.jsonl`: curation labels used by the curriculum.
+- `duplicate_report.json`: aggregate merge-audit record.
 
 The active SFT recipe keeps the natural 23.8% / 66.9% / 9.2% difficulty mix;
 forcing 30% / 50% / 20% would discard valid rows merely because hard examples

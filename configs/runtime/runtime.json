@@ -1,0 +1,20 @@
+{
+  "schema_version": "commerce-runtime-config-v1",
+  "attempts_per_task": 3,
+  "context_window": 24576,
+  "context_safety_margin": 512,
+  "max_generated_tokens_per_turn": 512,
+  "max_steps": 35,
+  "observation_search_tokens": 1536,
+  "observation_detail_tokens": 4096,
+  "observation_generic_tokens": 768,
+  "observation_search_top_k": 20,
+  "teacher": {
+    "model": "deepseek-v4-flash",
+    "thinking": false,
+    "temperature": 0.7,
+    "top_p": 0.9
+  },
+  "environment_manifest": "data/environment.json",
+  "system_prompt": "configs/runtime/system_prompt.txt"
+}

@@ -65,10 +65,17 @@ Important defaults:
 | Policy learning rate | `1e-6` |
 | LoRA rank / alpha | 16 / 32 |
 | Maximum model length | 24,576 |
-| Maximum training steps | 500 |
+| Formal contract training steps | 500 |
 | Save / validation frequency | 50 / 50 |
 | KL reward / KL loss | disabled / disabled |
-| Policy entropy measurement | enabled (logging only) |
+| Canonical policy entropy measurement | enabled (logging only) |
+
+The canonical [`configs/grpo.yaml`](../configs/grpo.yaml) sets
+`actor_rollout_ref.actor.calculate_entropy=true`. The v1 Pilot used the
+recorded runtime override `actor_rollout_ref.actor.calculate_entropy=false` to
+fit long responses in memory. Because `entropy_coeff=0`, this override did not
+change the loss or gradients; it only removed the entropy observation from the
+Pilot diagnostics.
 
 Dynamic sampling can generate at most three batches to find a useful update and
 permits at most ten consecutive skipped updates. These bounds prevent an
@@ -78,9 +85,10 @@ Each run also appends `training_diagnostics.jsonl` under its output directory.
 `generation_batch` records contain every generated rollout, its public tool
 sequence, terminal result, reward breakdown, Guard rejection reasons and group
 keep/drop decision. `optimizer_step` records preserve the scalar veRL metrics,
-including entropy, PPO KL, clip fractions, response lengths and effective-group
-rates. `skipped_update` records make zero-signal attempts visible even though
-they do not advance the optimizer step.
+including PPO KL, clip fractions, response lengths and effective-group rates.
+Entropy is present only when `calculate_entropy` is enabled; it is absent from
+the v1 Pilot records. `skipped_update` records make zero-signal attempts visible
+even though they do not advance the optimizer step.
 
 The canonical configuration is [`configs/grpo.yaml`](../configs/grpo.yaml).
 Advanced overrides may be appended after `--`:
@@ -107,5 +115,8 @@ bash scripts/export_grpo.sh \
   outputs/models/grpo-merged
 ```
 
-The reported comparison uses step 100. Select checkpoints using validation
-metrics rather than assuming that the final training step is best.
+The formal contract is `total_training_steps=500`. For the current v1 run, an
+exact-step barrier stopped training in a controlled manner at optimizer step
+100; the reported M3 model is the step-50 export. This is the frozen result
+used in the Final-200 aggregate comparison and must not be generalized to
+other GRPO recipes.

@@ -3,17 +3,17 @@ import tempfile
 import unittest
 from http.client import RemoteDisconnected
 from pathlib import Path
-from urllib.error import URLError
 from unittest.mock import patch
+from urllib.error import URLError
 
 from shopping_grpo.environment.actions import action_guard_tool_message
 from shopping_grpo.environment.client import ShopEnvironmentError
 from shopping_grpo.evaluation.rollout import (
+    SYSTEM_PROMPT,
     CollectionInfrastructureError,
     OpenAIChatClient,
-    SYSTEM_PROMPT,
-    collect_tasks,
     collect_for_task,
+    collect_tasks,
     completed_task_attempts,
     load_tasks,
     rollout_interrupted,
@@ -74,7 +74,9 @@ class ReleaseFailingEnv(FakeEnv):
 
 class UnavailableEnv(FakeEnv):
     def reset(self, task_id):
-        raise ShopEnvironmentError("Unable to get available environment resource, please try again later")
+        raise ShopEnvironmentError(
+            "Unable to get available environment resource, please try again later"
+        )
 
 
 class GuardRecoveryEnv(FakeEnv):
@@ -151,7 +153,10 @@ class RolloutTest(unittest.TestCase):
         self.assertIn("不要在任务结束前输出最终答复", SYSTEM_PROMPT)
         self.assertIn("当前页面是动作合法性的唯一依据", SYSTEM_PROMPT)
         self.assertIn("信息子页", SYSTEM_PROMPT)
-        self.assertIn("必须先调用当前页面可见的 `prev_page` 或 `back_to_search` 返回", SYSTEM_PROMPT)
+        self.assertIn(
+            "必须先调用当前页面可见的 `prev_page` 或 `back_to_search` 返回",
+            SYSTEM_PROMPT,
+        )
         self.assertIn("无参数工具", SYSTEM_PROMPT)
         self.assertIn("历史 observation 可以用于记住和比较候选", SYSTEM_PROMPT)
         self.assertIn("不能直接点击历史页面中的 ASIN", SYSTEM_PROMPT)
@@ -255,7 +260,10 @@ class RolloutTest(unittest.TestCase):
         self.assertEqual(traj["status"], "done")
         self.assertEqual(env.actions, ["search[乳胶枕]", "click[100000000001]", "click[Buy Now]"])
         self.assertEqual(len(traj["blocked_tool_calls"]), 1)
-        self.assertEqual(traj["blocked_tool_calls"][0]["reason"], "click_not_in_previous_observation")
+        self.assertEqual(
+            traj["blocked_tool_calls"][0]["reason"],
+            "click_not_in_previous_observation",
+        )
         self.assertNotIn(
             "view_features",
             [step["tool_name"] for step in traj["steps"]],
@@ -275,10 +283,17 @@ class RolloutTest(unittest.TestCase):
             def step(self, action):
                 self.actions.append(action)
                 if action == "search[乳胶枕]":
-                    return {"instruction": "results [SEP] 100000000001", "reward": 0.0, "done": False}
+                    return {
+                        "instruction": "results [SEP] 100000000001",
+                        "reward": 0.0,
+                        "done": False,
+                    }
                 if action == "click[100000000001]":
                     return {
-                        "instruction": 'detail\n\n可点击的按钮: ["满天星", "Description", "Buy Now"]',
+                        "instruction": (
+                            'detail\n\n可点击的按钮: '
+                            '["满天星", "Description", "Buy Now"]'
+                        ),
                         "reward": 0.0,
                         "done": False,
                     }
@@ -334,7 +349,11 @@ class RolloutTest(unittest.TestCase):
             def step(self, action):
                 self.actions.append(action)
                 if action == "search[乳胶枕]":
-                    return {"instruction": "results [SEP] 100000000001", "reward": 0.0, "done": False}
+                    return {
+                        "instruction": "results [SEP] 100000000001",
+                        "reward": 0.0,
+                        "done": False,
+                    }
                 if action == "click[100000000001]":
                     return {
                         "instruction": 'detail\n\n可点击的按钮: ["满天星", "Buy Now"]',
@@ -447,7 +466,10 @@ class RolloutTest(unittest.TestCase):
     def test_collect_tasks_skips_existing_output_rows(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "raw.jsonl"
-            output.write_text(json.dumps({"task_id": 1, "trajectory_id": "old"}) + "\n")
+            output.write_text(
+                json.dumps({"task_id": 1, "trajectory_id": "old"}) + "\n",
+                encoding="utf-8",
+            )
             client = MockClient([assistant_tool("buy_now", {}, "call_buy")])
 
             written = collect_tasks(
@@ -458,7 +480,10 @@ class RolloutTest(unittest.TestCase):
                 max_steps=1,
                 env_factory=FakeEnv,
             )
-            rows = [json.loads(line) for line in output.read_text().splitlines()]
+            rows = [
+                json.loads(line)
+                for line in output.read_text(encoding="utf-8").splitlines()
+            ]
 
         self.assertEqual([row["task_id"] for row in rows], [1, 2])
         self.assertEqual(len(written), 1)
@@ -569,13 +594,19 @@ class RolloutTest(unittest.TestCase):
                             "type": "function",
                             "function": {
                                 "name": "search_products",
-                                "arguments": json.dumps({"query": f"乳胶枕{index}"}, ensure_ascii=False),
+                                "arguments": json.dumps(
+                                    {"query": f"乳胶枕{index}"}, ensure_ascii=False
+                                ),
                             },
                         }
                         for index in range(3)
                     ],
                 },
-                assistant_tool("search_products", {"query": "第二次观察后搜索"}, "call_after_observation"),
+                assistant_tool(
+                    "search_products",
+                    {"query": "第二次观察后搜索"},
+                    "call_after_observation",
+                ),
             ]
         )
         env = NonTerminalEnv()
@@ -620,7 +651,9 @@ class RolloutTest(unittest.TestCase):
         captured = {}
 
         def transport(url, payload, headers, timeout):
-            captured.update({"url": url, "payload": payload, "headers": headers, "timeout": timeout})
+            captured.update(
+                {"url": url, "payload": payload, "headers": headers, "timeout": timeout}
+            )
             return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
 
         client = OpenAIChatClient(
@@ -743,11 +776,26 @@ class RolloutTest(unittest.TestCase):
             {"role": "system", "content": "rules"},
             {"role": "user", "content": "task"},
             assistant_tool("search_products", {"query": "old"}, "old"),
-            {"role": "tool", "tool_call_id": "old", "name": "search_products", "content": "old page"},
+            {
+                "role": "tool",
+                "tool_call_id": "old",
+                "name": "search_products",
+                "content": "old page",
+            },
             assistant_tool("search_products", {"query": "middle"}, "middle"),
-            {"role": "tool", "tool_call_id": "middle", "name": "search_products", "content": "middle page"},
+            {
+                "role": "tool",
+                "tool_call_id": "middle",
+                "name": "search_products",
+                "content": "middle page",
+            },
             assistant_tool("search_products", {"query": "latest"}, "latest"),
-            {"role": "tool", "tool_call_id": "latest", "name": "search_products", "content": "latest page"},
+            {
+                "role": "tool",
+                "tool_call_id": "latest",
+                "name": "search_products",
+                "content": "latest page",
+            },
         ]
         client = OpenAIChatClient(
             model="shopping",
@@ -806,7 +854,10 @@ class RolloutTest(unittest.TestCase):
                                 {
                                     "id": "call_search",
                                     "type": "function",
-                                    "function": {"name": "search_products", "arguments": '{"query":"乳胶枕"}'},
+                                    "function": {
+                                        "name": "search_products",
+                                        "arguments": '{"query":"乳胶枕"}',
+                                    },
                                 }
                             ],
                         }
@@ -823,7 +874,10 @@ class RolloutTest(unittest.TestCase):
             transport=transport,
         )
 
-        message = client.complete([{"role": "user", "content": "买乳胶枕"}], tools=[{"type": "function"}])
+        message = client.complete(
+            [{"role": "user", "content": "买乳胶枕"}],
+            tools=[{"type": "function"}],
+        )
 
         self.assertEqual(captured["payload"]["thinking"], {"type": "enabled"})
         self.assertEqual(captured["payload"]["reasoning_effort"], "high")

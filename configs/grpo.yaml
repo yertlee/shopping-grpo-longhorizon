@@ -1,6 +1,6 @@
 # Shopping Agent GRPO configuration.
 #
-# 冻结合同（HANDOFF_TRAINING_IMPLEMENTATION_GAPS §3 / §6，只允许注释，不做语义修改）：
+# 冻结训练合同；语义变更必须重新生成并审计对应的运行身份：
 # - GRPO_MODEL_PATH 必须指向已验收的 M2 merged checkpoint（Process-clean SFT 合并产物，
 #   目录内 merge_manifest.json 的 verification.passed 必须为 true；scripts/train_grpo.py
 #   启动前 preflight 会强制校验，禁止 adapter 目录或原始 Base）。

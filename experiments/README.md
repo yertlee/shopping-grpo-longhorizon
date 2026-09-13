@@ -1,16 +1,19 @@
 # Experiments
 
-This directory contains the compact, reviewable artifacts behind the README
-result table. Large checkpoints and complete trajectories are intentionally not
-stored in Git.
+This directory contains compact, reviewable experiment metadata. The current
+formal results for this fork are the aggregate-only records in
+[`commerce-v1/`](commerce-v1/). Large checkpoints and complete trajectories are
+intentionally not stored in Git.
 
 ```text
-baseline/   base-model evaluation config and summary
-sft/        SFT training/evaluation config and summary
-grpo/       GRPO training/evaluation config and summary
-comparison.md
+commerce-v1/  current fork: frozen M0–M3 aggregate results and identities
+baseline/     upstream historical snapshot; not the current v1 result
+sft/          upstream historical snapshot; not the current v1 result
+grpo/         upstream historical snapshot; not the current v1 result
+comparison.md current M0–M3 aggregate comparison
 ```
 
-All reported models use the same 200 held-out tasks, Environment v2.1 and
-Reward v3. See [comparison.md](comparison.md) for interpretation and protocol
-limitations.
+Use [comparison.md](comparison.md) or the canonical
+[`commerce-v1/`](commerce-v1/) record for the current M0–M3 numbers. The
+`baseline/`, `sft/`, and `grpo/` directories are retained as upstream
+historical snapshots and must not be read as the current fork's result table.

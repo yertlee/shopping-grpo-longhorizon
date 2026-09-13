@@ -1,5 +1,7 @@
 # SFT 高增益、GRPO 低增益与逐 Turn 信用分配：诊断性调研
 
+> **上游历史分析。** 本文保留用于记录早期研究假设与证据边界，不代表当前 fork 的结果。当前 v1 结论见 [../results-v1.md](../results-v1.md)；当前聚合表见 [../../experiments/comparison.md](../../experiments/comparison.md)。
+
 > 调研日期：2026-08-10。本文只做现有证据梳理和可证伪分析，不提出已经被结果证明的训练结论，也不执行训练。
 
 ## 结论先行
@@ -7,8 +9,8 @@
 1. 用户口述的“Super Similar”几乎可以由仓库中的明确引用消歧为 **ShopSimulator**，不是另一个叫 Super Similar 的基准：项目 README、内嵌上游信息和论文链接都指向 `ShopSimulator: Evaluating and Exploring RL-Driven LLM Agent for Shopping Assistants`（arXiv:2601.18225）。仓库中没有检索到 “Super Similar” 这个名称。[项目 README](../../README.md)；[内嵌上游信息](../../environments/ShopSimulator/EMBEDDED_SOURCE.json)；[ShopSimulator 原论文](https://arxiv.org/abs/2601.18225)
 2. 当前的 `60.5%` SFT 严格成功率**不能与论文“最强模型总体 full-success 低于 40%”直接比较**。论文总体分数平均了单轮、个性化单轮、多轮、个性化多轮四种场景；当前项目则明确规定为“完整需求在开头给出”的单轮任务，禁止追问，另有详细流程提示、强类型工具和 Action Guard。论文中 GPT-5 的单轮 `Rsucc` 本身已是 `40.78%`，总体才是 `32.65%`。[ShopSimulator §2.4、§3.1、Table 2](https://arxiv.org/pdf/2601.18225)；[当前 rollout prompt](../../src/shopping_grpo/evaluation/rollout.py)
 3. 当前数据更支持“SFT 主要解决了协议与流程冷启动”，还不能支持“Reward 太简单”。Base→SFT 时 `done` 从 `18.0%` 到 `96.5%`、Guard rejection 从 `752` 降到 `52`，严格成功从 `0` 到 `121/200`。这首先说明 Base 几乎不会稳定执行协议；SFT 的大增益不等于细粒度商品判断已经容易。[实验对比](../../experiments/comparison.md)
-4. `SFT 60.5% → GRPO 62.0%` 目前不是可靠的“仅提升 1.5 个点”结论：每题只有一次确定性 rollout；配对结果是 12 个失败转成功、9 个成功回退，净增 3 题。对 21 个 discordant pair 做双侧 exact McNemar 检验得到 `p≈0.664`，无法区分真实小增益与任务级抽样噪声。同时，平均 Reward、Guard rejection、循环和最大步数均有改善，说明“成功率没有明显拉开”和“训练完全没有作用”也不是同一件事。[实验对比](../../experiments/comparison.md)；[项目结果解释](../../docs/drafts/2026-07-30-shopping-agent-post-training-blog.md)
-5. “SFT 训过头导致低熵、失去可塑性”是合理假设，但当前配置和结果**没有直接熵证据**：`calculate_entropy=false`，且没有提交逐 step 训练日志。应先看 rollout 多样性、零方差 group 比例、upper-clip fraction 和不同 SFT checkpoint 的 RL 可学习性，再决定减少 SFT epoch 或换“不完美 SFT”。[GRPO 配置](../../configs/grpo.yaml)
+4. `SFT 60.5% → GRPO 62.0%` 目前不是可靠的“仅提升 1.5 个点”结论：每题只有一次确定性 rollout；配对结果是 12 个失败转成功、9 个成功回退，净增 3 题。对 21 个 discordant pair 做双侧 exact McNemar 检验得到 `p≈0.664`，无法区分真实小增益与任务级抽样噪声。同时，平均 Reward、Guard rejection、循环和最大步数均有改善，说明“成功率没有明显拉开”和“训练完全没有作用”也不是同一件事。[实验对比](../../experiments/comparison.md)；[当前 v1 结果](../results-v1.md)
+5. “SFT 训过头导致低熵、失去可塑性”是合理假设，但 v1 Pilot 和结果**没有直接熵证据**：canonical 配置为 `calculate_entropy=true`，实际 Pilot 通过已记录的 runtime override 设为 `false`，且没有提交逐 step 训练日志。应先看 rollout 多样性、零方差 group 比例、upper-clip fraction 和不同 SFT checkpoint 的 RL 可学习性，再决定减少 SFT epoch 或换“不完美 SFT”。[GRPO 配置](../../configs/grpo.yaml)
 6. DAPO 并不是四个开关全都缺失：本项目已经用了 `token-mean` loss 和有限 dynamic sampling；真正未采用的是不对称 `clip-high`，而当前“长度 shaping”也不是 DAPO 的 token 截断处理。先补诊断指标，再做最小消融，比直接堆 DAPO 更有信息量。[DAPO 论文](https://arxiv.org/abs/2503.14476)；[DAPO 官方仓库](https://github.com/BytedTsinghua-SIA/DAPO)；[veRL 官方 DAPO recipe](https://github.com/verl-project/verl-recipe/blob/main/dapo/run_dapo_qwen2.5_32b_npu.sh)
 7. AgentOPSD 确实做逐 Agent Turn 信用分配，但不是“把终局 Reward 平均拆到每 Turn”。它需要一个**训练期专用、推理期移除的 privileged skill**，用同一模型对同一已采样动作做普通/skill-conditioned 两次打分，再递归更新成功 belief。当前项目没有这样的 skill retriever；论文官方仓库截至调研日仍写着 “Code coming soon”，因此它适合作为第二阶段研究方向，不是现在可直接套用的低风险配置项。[AgentOPSD 论文](https://arxiv.org/pdf/2608.05987)；[官方仓库](https://github.com/ZethWang/AgentOPSD)
 
@@ -108,7 +110,7 @@ SFT 的主要作用很像原论文所说的 workflow prior：先学会搜索、�
 
 ### 2.3 SFT 过拟合/低熵假设目前缺哪块证据
 
-当前训练配置关闭 entropy 计算，因此“低熵”尚未被观测。success-only Teacher 数据还可能造成两种不同现象：
+v1 Pilot 的 runtime override 关闭 entropy 计算，因此“低熵”尚未被观测；canonical 配置仍默认开启该观测。success-only Teacher 数据还可能造成两种不同现象：
 
 - **好现象**：动作协议稳定，减少无效探索；
 - **坏现象**：搜索表达、候选比较和失败恢复模式过窄，同题 rollout 几乎相同。

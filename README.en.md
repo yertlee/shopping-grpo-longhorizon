@@ -1,403 +1,176 @@
-# Shopping GRPO
+# Shopping GRPO: Reproducible Post-Training for Long-Horizon Shopping Agents
 
-<div align="center">
+> A Baseline → SFT → GRPO → Evaluation study built around ShopSimulator and Qwen3.5-2B.
 
-**English** · [简体中文](README.md)
+[中文 README](README.md) · [Architecture](docs/architecture.md) · [Data pipeline](docs/data-pipeline-v1.md) · [Results](docs/results-v1.md) · [Reproducibility](docs/reproducibility-v1.md) · [Limitations](docs/limitations.md)
 
-<br />
+## Positioning / TL;DR
 
-Reproducible post-training and evaluation for long-horizon shopping agents
+This project tests whether supervised fine-tuning and online GRPO can make a long-horizon shopping agent reliable at tool use. The agent must search, inspect products, select variants, and purchase in an interactive environment.
 
-<br />
+Frozen Final-200 Clean results use a fixed denominator of 200:
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
-[![LoRA SFT](https://img.shields.io/badge/Post--training-LoRA%20SFT-7B61FF)](docs/sft.md)
-[![veRL](https://img.shields.io/badge/veRL-0.8.0-0E8A16)](https://github.com/verl-project/verl)
-[![ShopSimulator](https://img.shields.io/badge/Environment-ShopSimulator%20v2.1-4C78A8)](https://arxiv.org/pdf/2601.18225)
-[![Benchmark](https://img.shields.io/badge/Benchmark-Final--200--Clean-F59E0B)](docs/evaluation-dataset.md)
+| Model | Strict gold success |
+|---|---:|
+| M0 Base | 2/200 (1.0%) |
+| M1 Outcome SFT | 137/200 (68.5%) |
+| M2 Process SFT | 130/200 (65.0%) |
+| M3 GRPO (step-50 export) | 131/200 (65.5%) |
 
-<br />
+SFT supplies the main gain (M0→M1 **+67.5pp, p<0.0001**). Process selection does not beat Outcome (M1→M2 **−3.5pp, p=.230**). Under `lr=1e-6`, LoRA `r=16`, and `n=4` rollouts per prompt, GRPO produced no detectable gain (M2→M3 **+0.5pp, exact McNemar p=1.000; CI includes 0**). The GRPO contract is `total_training_steps=500` with `save_freq=50`; this run stopped at 100 optimizer steps and selected step50. Infrastructure invalidity is 1–2%, above the project’s `<1%` target, and remains in the denominator.
 
-Teacher rollouts and LoRA SFT → online GRPO with veRL → auditable comparison on
-a frozen benchmark
+## ShopSimulator
 
-</div>
+[ShopSimulator](https://arxiv.org/pdf/2601.18225) is a Chinese interactive environment for long-horizon shopping agents. Tasks combine category, budget, brand, model, feature, and variant constraints. The agent searches, opens details, verifies attributes, selects a variant, and purchases; terminal outcomes are checked by deterministic Reward v3.
 
-![Shopping GRPO project overview](docs/images/project-overview-pipeline.png)
+The frozen runtime is included at [`environments/ShopSimulator/`](environments/ShopSimulator/), with environment `shopsimulator-environment-v2.1` and reward `shopsimulator-reward-v3`.
 
-## What is ShopSimulator?
-
-[ShopSimulator](https://arxiv.org/pdf/2601.18225) is a large-scale Chinese
-shopping environment for evaluating long-horizon LLM agents. A task describes
-what a user wants—including category, budget, brand, model, functions and
-product options—but the agent must discover the right item through interaction.
-
-In this project the agent can search products, open candidates, inspect details,
-select variants, buy, or stop when no acceptable item can be verified. Success
-therefore requires more than producing a plausible answer: the agent must gather
-evidence, obey constraints, choose the correct variant and terminate correctly.
-
-The frozen Environment v2.1 source and product archive are embedded under
-[`environments/ShopSimulator/`](environments/ShopSimulator/), so the tutorial
-does not depend on a separately running third-party repository.
-
-![ShopSimulator overview](docs/images/shopsimulator-overview.png)
-
-## The four stages
-
-| Stage | What happens | Entry point | Details |
-|---|---|---|---|
-| Baseline | Evaluate the untouched base model | `bash scripts/baseline.sh` | [Evaluation](docs/evaluation.md) |
-| SFT | Learn tool use from accepted teacher trajectories | `bash scripts/sft.sh` | [SFT](docs/sft.md) |
-| GRPO | Optimize terminal Reward v3 with online rollouts | `bash scripts/grpo.sh` | [GRPO](docs/grpo.md) |
-| Evaluation | Run the curated Final-200 Clean protocol | `bash scripts/evaluate.sh NAME` | [Evaluation](docs/evaluation.md) |
-
-The checked-in SFT data was produced by a separate collection stage documented
-in [Data collection](docs/data-collection.md). The custom constraint-aware
-reward is specified in [Reward v3](docs/reward-v3.md).
+## End-to-end architecture
 
 ```mermaid
 flowchart LR
-    A[Teacher rollouts] --> B[Reward v3 filtering]
-    B --> C[Action-only SFT data]
-    C --> D[LoRA SFT]
-    D --> E[Online GRPO with veRL]
-    F[Frozen ShopSimulator v2.1] --> E
-    G[Final-200 Clean held-out tasks] --> H[Shared evaluation pipeline]
-    I[Baseline] --> H
-    D --> H
-    E --> H
+    A[ShopSimulator data] --> B[Task facts / split manifest]
+    B --> C[Teacher: 3 attempts/task]
+    C --> D[Reward v3 + structural checks]
+    D --> E[Outcome / Process curation]
+    E --> F[M1/M2 action-only LoRA SFT]
+    F --> G[M3 online veRL GRPO]
+    B --> H[Final-200 Clean]
+    H --> I[One rollout for M0/M1/M2/M3]
+    I --> J[Hard checks + rubric/judge + paired statistics]
 ```
 
-### How the SFT data was collected
+All stages share the environment, tool schema, Action Guard, Observation projection, and Reward version. Manifests and hashes bind runtime identity. GRPO trains only on valid Reward v3 terminal utility; LLM judges are offline explanatory tools, not training rewards or checkpoint selectors.
 
-The current collection used `deepseek-v4-flash` as a teacher in ShopSimulator
-Environment v2.1. It produced 2,498 raw trajectories, of which 1,026 passed the
-strict acceptance filter. This frozen revision uses 1,000 trajectories split
-into 800 training and 200 validation rows. SFT, GRPO and Final-200 Clean task IDs are
-pairwise disjoint. Dataset hashes and the audit are in
-[Data collection](docs/data-collection.md).
+## Data cleaning
 
-The resumable collection entry point is:
+The decompressed upstream task-facts source contains **23,421** rows. Frozen splits are Teacher pool 1,300, GRPO train 1,000, GRPO validation 50, and Final-200 Clean 200. Each Teacher task has three attempts; infrastructure retries retain request identity and are not counted as new policy samples.
 
-```bash
-python scripts/collect_sft_data.py \
-  --tasks data/grpo/train.jsonl \
-  --output-dir outputs/sft-collection \
-  --target-accepted 1000 \
-  --workers 4
-```
+The curation sequence is:
 
-### How GRPO is trained
+1. Build leakage components from task/product identity, normalized queries, templates, explicit model tokens, and product families; isolate Final-200 first.
+2. Require a terminal `done/over`, `reward_valid=true`, and complete `gold_purchase` under Reward v3.
+3. Reject illegal actions, malformed schemas, structurally damaged trajectories, missing evidence, and unverifiable terminals while retaining rejection reasons.
+4. From successful trajectories of the same task, build Outcome (first qualifying trajectory) and Process (actor-visible process-feature selection) datasets.
+5. Load only manifest-approved tasks; never use Final-200 for data selection, thresholds, or checkpoint tuning.
 
-GRPO starts from the merged SFT model. veRL generates four online trajectories
-per prompt in ShopSimulator, while deterministic Reward v3 scores the terminal
-purchase, constraint satisfaction and termination behavior. No additional
-LLM-as-a-Judge reward model is used for training.
+The audited collection counts are 2,100 valid strategy attempts, 2,370 append-only raw rows, 1,343 strict-gold trajectories, and 1,265 trajectories across 512 usable tasks after hard checks. The curated split is train 400, dev 100, and reserve 12. After the 24,576-token shared-union length gate and difficulty-matched reserve, the true SFT-ready input is train 398 rows and dev 100 rows; Outcome and Process have equal task sets. The curated count of 400 is not the final training-row count.
 
-The repository pins `verl==0.8.0` instead of copying its source. It keeps only
-the project-specific AgentLoop, tool adapter, runtime compatibility code and a
-small SHA-256-checked patch. See the [GRPO guide](docs/grpo.md) for details.
+## Model matrix
 
-### How evaluation works
+| ID | Initialization / data | Purpose |
+|---|---|---|
+| M0 | Qwen3.5-2B base | Tool-use baseline |
+| M1 | M0 + Outcome action-only LoRA SFT | First qualifying successful trajectory |
+| M2 | M0 + Process action-only LoRA SFT | Same-task process-aware selection |
+| M3 | M2 + online GRPO; 500-step contract; controlled stop at optimizer step 100; step-50 export | Test for an additional online-reward gain |
 
-Formal evaluation combines deterministic checks with two LLM-as-Judge roles.
-DeepSeek V4 Flash curates a frozen requirement Rubric from code-generated
-category, brand, model, function, option and price candidates. It may select and
-deduplicate candidates, but cannot invent fields or expected values. The same
-Rubric is shared by Baseline, SFT and GRPO.
+SFT computes loss only on assistant action tokens; the query and environment observations are masked. M3 starts from M2. Its frozen contract is `total_training_steps=500` and `save_freq=50`; this run stopped at 100 optimizer steps through an internal exact-step barrier and used the step-50 export for Final-200.
 
-After each Actor completes a rollout, code normalizes events and computes
-Reward, legality, repetition, context and infrastructure checks. Valid
-trajectories then go to DeepSeek V4 Pro with the original Query, frozen Rubric,
-Actor-visible trajectory, neutral terminal flags and allowlisted behavioral
-metrics. Reward values, hidden Gold fields, raw observations, success labels and
-other models' results are excluded.
+## Training method
 
-```mermaid
-flowchart TD
-    A[Benchmark task ID] --> B[Private TaskFacts]
-    B --> C[Code-generated candidates]
-    C --> D[V4 Flash frozen Rubric]
-    A --> E[Actor rollout]
-    E --> F[Normalization and hard checks]
-    F -->|valid| G[Judge-safe payload]
-    D --> G
-    G --> H[V4 Pro requirement and five-dimension judgment]
-    F -->|infrastructure invalid| I[not_judged]
-    H --> J[Four-panel aggregation]
-    I --> J
-    J --> K[Paired Baseline / SFT / GRPO comparison]
-```
+- SFT: single-GPU LoRA, rank 16 and alpha 32; Outcome and Process use identical task IDs.
+- GRPO: veRL 0.8.0 online rollouts, four trajectories per prompt, learning rate `1e-6`, with a `total_training_steps=500` and `save_freq=50` contract. This run stopped at 100 optimizer steps through the controlled barrier. Dynamic sampling handles uninformative groups without changing Reward v3.
+- Merged exports carry independent manifests; the M3 adapter is merged into the M2 base before serving.
 
-V4 Pro scores Search Strategy, Candidate Utilization, Evidence Verification,
-Decision Quality and Termination Efficiency independently on a 0/1/2 scale. It
-also assesses each Rubric and assigns errors from a frozen taxonomy. The final
-report keeps Reward/terminal, requirement Rubric, trajectory quality and
-deterministic behavior as four separate panels—there is no composite score.
-Failed, missing and not-judged tasks remain in the Final-200 Clean denominator. The
-[evaluation guide](docs/evaluation.md) contains the complete prompts, one
-worked benchmark example, input-isolation rules and aggregation contract. An
-historical static view is available in the [Final-200 Benchmark Dashboard](docs/evaluation-dashboard.html); the current task set is documented in [Final-200 Clean](docs/evaluation-dataset.md).
+## Unified evaluation
 
-> **Reserved figure — Training and evaluation pipeline.** A full-width diagram
-> showing teacher data collection, LoRA SFT, online GRPO rollouts and the shared
-> held-out evaluation path, with artifacts produced at each boundary.
+Every model uses the same Final-200 Clean split, environment, and protocol: one rollout per task and a fixed denominator of 200. The evaluator normalizes trajectories, applies Action Guard and terminal checks, freezes per-task rubric constraints from private TaskFacts, judges only a de-identified valid trace, and reports fixed-denominator metrics plus task-paired exact McNemar and bootstrap comparisons.
 
-## Results
+Infrastructure-invalid tasks stay in the denominator and are `not_judged` on the judge side. Reward values, private gold fields, success labels, and other model results are withheld from the trajectory judge.
 
-A contributor reproduction is now available on the current Final-200 Clean
-benchmark. See the [evaluation update log](docs/evaluation-updates.md) for the
-full protocol, failure distribution and artifact hashes:
+## Final-200 results
 
-| Model | Strict success | Purchase success | Done rate | Mean reward |
+| Model | Strict success | Infra invalid | Mean steps | Mean terminal utility |
 |---|---:|---:|---:|---:|
-| Qwen3.8-27B (BF16 weights, thinking disabled) | 73.0% | 73.0% | 99.5% | 0.6354 |
+| M0 Base | 2/200 (1.0%) | 2 | 5.40 | −0.100 |
+| M1 Outcome SFT | 137/200 (68.5%) | 3 | 12.05 | +0.584 |
+| M2 Process SFT | 130/200 (65.0%) | 4 | 11.50 | +0.553 |
+| M3 GRPO step50 | 131/200 (65.5%) | 2 | 11.05 | +0.563 |
 
-The following are archived Final-200 results; new comparisons use Final-200 Clean:
+Paired deltas are M0→M1 +67.5pp (p<0.0001), M1→M2 −3.5pp (p=.230), and M2→M3 +0.5pp (exact McNemar p=1.000; paired CI includes 0). See the [v1 results report](docs/results-v1.md).
 
-| Model | Strict success | Purchase success | Mean reward |
-|---|---:|---:|---:|
-| Qwen3.5-2B baseline | 0.0% | 0.0% | -0.1105 |
-| LoRA SFT | 60.5% | 60.5% | 0.4729 |
-| GRPO step 100 | 62.0% | 62.5% | 0.5158 |
+## Interpretation and limitations
 
-The complete compact summaries and reproduction settings are in
-[`experiments/`](experiments/). These are reported results, not a promise that
-different hardware or dependency versions will produce bit-identical training.
+The evidence supports successful-trajectory SFT as the main capability source. It does not show that Process selection is better, nor does it generalize the GRPO finding beyond this recipe. The precise claim is: under this recipe, GRPO produced no detectable gain.
 
-## Training hardware and time
-
-All training used a single NVIDIA RTX 6000 with 96 GB of GPU memory.
-
-### LoRA SFT training (448 training examples, 3 epochs)
-
-| Stage | Time | Peak GPU memory |
-|---|---:|---:|
-| One epoch (56 steps) | ~62 min | 89 GiB |
-| Full 3-epoch training | ~3 h | 89 GiB |
-
-### GRPO training (veRL 0.8, 8 environment workers)
-
-| Step range | Per-step time | Cumulative time |
-|---|---:|---:|
-| steps 0–24 | ~140 s/step, including Ray startup | ~56 min |
-| stable steps 20–30 | ~73–120 s/step | ~2 min/step in the steady state |
-| 100 steps (reported checkpoint) | ~110 s/step on average | ~3–4 h |
-| Full 500 steps | ~100 s/step | ~14 h |
-
-### Other stages
-
-| Stage | Estimated time |
-|---|---:|
-| Teacher collection (2,498 raw trajectories) | Depends on endpoint concurrency and rate limits |
-| Final-200 Clean evaluation (Base) | ~20 min |
-| Final-200 Clean evaluation (SFT/GRPO) | ~40–60 min |
-| LLM Judge scoring for 200 trajectories | ~30–60 min |
-
-## Requirements
-
-- Linux with an NVIDIA GPU and a compatible CUDA driver;
-- [`uv`](https://docs.astral.sh/uv/);
-- about 25 GB of free disk for environments, weights and generated artifacts;
-- approximately 48 GB GPU memory for the provided SFT recipe;
-- one 96 GB GPU for the provided GRPO recipe.
-
-The main environment uses Python 3.12. ShopSimulator is isolated on Python 3.10.
-`uv` creates both environments. veRL is **installed as the pinned
-`verl==0.8.0` dependency**; its source is not copied into this repository. Only
-the Shopping Agent adapter and a small version-checked patch live here.
+Limitations include one fixed-protocol Final-200 run (no estimate of seed variance), a simulated shopping environment, 1–2% infrastructure invalidity above the `<1%` target, a 500-step GRPO contract that was controlled-stopped at 100 optimizer steps with a small LoRA update and one learning rate, and an LLM judge intended for explanation rather than replacing deterministic strict success.
 
 ## Quick start
 
-Run every command from the repository root.
-
-### 1. Install
+On Linux with Python 3.10+, CUDA, and `uv`:
 
 ```bash
 bash scripts/setup.sh
-```
-
-This installs the pinned SFT and GRPO dependencies, creates the isolated
-ShopSimulator environment, verifies and expands the product archive, builds the
-search index and applies the version-checked veRL patch.
-
-### 2. Start ShopSimulator
-
-Keep this terminal running:
-
-```bash
 bash scripts/start_environment.sh
-```
-
-The service listens on `http://127.0.0.1:5700`.
-
-### 3. Evaluate the baseline
-
-Start the base model server in a second terminal:
-
-```bash
 bash scripts/serve_model.sh Qwen/Qwen3.5-2B
-```
-
-Evaluate it in a third terminal:
-
-```bash
 bash scripts/baseline.sh
 ```
 
-Stop the model server before training so it releases the GPU.
-
-### 4. Train and evaluate SFT
+Then train and evaluate:
 
 ```bash
 bash scripts/sft.sh
 bash scripts/serve_model.sh outputs/models/sft-merged
 bash scripts/evaluate.sh sft
-```
 
-Stop the model server again before GRPO.
-
-### 5. Train GRPO
-
-First inspect the fully resolved launcher without starting CUDA or Ray:
-
-```bash
 bash scripts/grpo.sh --dry-run
-```
-
-Then train:
-
-```bash
 bash scripts/grpo.sh
-```
-
-Choose a checkpoint using validation metrics and export its actor:
-
-```bash
-bash scripts/export_grpo.sh \
-  outputs/models/grpo/global_step_100/actor \
-  outputs/models/grpo-merged
-```
-
-Evaluate it:
-
-```bash
-bash scripts/serve_model.sh outputs/models/grpo-merged
+bash scripts/export_grpo.sh <checkpoint>/actor <verl-fsdp-export-dir>
+PYTHONPATH=src python scripts/merge_grpo_lora.py --help
+PYTHONPATH=src python scripts/merge_grpo_lora.py \
+  --base-dir <verl-fsdp-export-dir> \
+  --output <standalone-hf-dir> \
+  --source-run-id <run-id>
+bash scripts/serve_model.sh <standalone-hf-dir>
 bash scripts/evaluate.sh grpo
 ```
 
-Generated checkpoints, rollouts and logs are written under `outputs/`, which is
-ignored by Git.
+`export_grpo.sh` only performs the veRL/FSDP export. Because the actor is a PEFT LoRA checkpoint, run `scripts/merge_grpo_lora.py` (inspect `--help` first) to produce a standalone HF model before serving or evaluating it.
 
-## Reward V3 overview
+See the [reproducibility guide](docs/reproducibility-v1.md) for identity checks and a cost-aware order of operations.
 
-Reward v3 is a deterministic terminal reward; it does not rely on another
-language model for subjective judgment:
-
-- category and budget are hard gates;
-- brand, model, core functions and key options use weights of
-  `0.35 / 0.25 / 0.25 / 0.15`;
-- an exact target purchase with full satisfaction receives `1.0`;
-- a fully satisfying alternative item receives `0.55`;
-- partial satisfaction receives a continuous score capped at `0.25`;
-- wrong purchases, premature abstention, repeat loops and maximum-step
-  termination receive distinct negative rewards;
-- insufficient evidence sets `reward_valid=false`, rather than being treated as
-  a valid neutral zero.
-
-![Reward V3 decision rules](docs/images/reward-v3-decision-rules.png)
-
-The complete formula, termination rules and evidence requirements are in the
-[Reward v3 design guide](docs/reward-v3.md).
-
-## Repository map
+## Repository tree
 
 ```text
-configs/                         current GRPO, AgentLoop and tool configuration
-data/
-  sft/                           800 train + 200 validation trajectories
-  grpo/                          ready-to-train JSONL and veRL Parquet
-  evaluation/                    curated Final-200 Clean held-out set
-docs/                            one guide for each tutorial stage and Reward v3
-environments/ShopSimulator/      embedded environment and product archive
-experiments/
-  baseline/                      baseline config and result summary
-  sft/                           SFT config and result summary
-  grpo/                          GRPO config and result summary
-scripts/                         thin user-facing tutorial entry points
-src/shopping_grpo/
-  collection/                    Teacher acceptance and SFT data construction
-  environment/                   HTTP client, tools, actions and observations
-  training/sft/                  SFT dataset masking and collation
-  training/grpo/                 veRL adapter, compatibility and sampling logic
-  evaluation/                    hard checks, Rubrics, trajectory Judge and metrics
-tests/                           focused unit, launcher and packaging checks
+configs/                         runtime, tool, and GRPO configuration
+data/                            SFT, GRPO, evaluation inputs and metadata
+docs/                            public architecture, data, results, and QA notes
+environments/ShopSimulator/     frozen environment, Reward v3, and product source
+experiments/                     baseline, sft, grpo, and comparison
+experiments/commerce-v1/         canonical v1 result/archive namespace
+scripts/                         setup, training, export, and evaluation entrypoints
+src/shopping_grpo/               environment, SFT, GRPO, and evaluation code
+src/commerce_posttrain/          canonical data/runtime-contract interfaces
+tests/                           unit, contract, entrypoint, and regression tests
 ```
 
-The project keeps focused checks for the CPU smoke path, offline trajectory
-evaluation, GRPO launcher arguments, non-editable wheel installation, Reward
-aggregation and the frozen environment manifest. Cleanup does not mean deleting
-tests that protect the public workflow.
+## Reproduction identity
 
-## Configuration
-
-Most users only need these environment variables:
-
-| Variable | Default |
+| Object | Frozen identity |
 |---|---|
-| `BASE_MODEL` | `Qwen/Qwen3.5-2B` |
-| `SHOPSIM_BASE_URL` | `http://127.0.0.1:5700` |
-| `LLM_BASE_URL` | `http://127.0.0.1:8000/v1` |
-| `SERVED_MODEL_NAME` | `shopping-agent` |
-| `SFT_ADAPTER_DIR` | `outputs/models/sft-lora` |
-| `SFT_MERGED_DIR` | `outputs/models/sft-merged` |
+| Upstream | [YYHDBL/shopping-grpo-longhorizon](https://github.com/YYHDBL/shopping-grpo-longhorizon), commit `4ed73020e1d7d07eb93e7375a4606b0901d3cded` |
+| ShopSimulator | commit `9ecba272963960ab4a10e1a781bd05cd7634ce20` |
+| Product source, compressed | `f51c33217061479f9c95a1068621fcd38e4883ae3d2f6a1627037bea934f2125` |
+| Product source, decompressed | `57b10950a0064d16c81535a1d764a75879a508d250dde8a2a1787c5e6045559f` |
+| Current-code runtime contract | `5f0967e9dd0cad5f8041484bdb70a6baaf6ee14e8df81f966bf77adbce6e1bac` |
+| Final-200 task split | `d99112a20ef47534c27a32e4b38229bf048dcc6b06fef2e3e919aac3093662f5` |
+| Protocol recorded by the four-model Final-200 evaluation | `0986526cecc9b1a9770c7786b049689a95528c4c6f72a11be78f6400b5049cec` |
 
-Advanced GRPO overrides can be appended after `--`:
-
-```bash
-bash scripts/grpo.sh -- \
-  trainer.total_training_steps=20 \
-  trainer.save_freq=10
-```
-
-SwanLab logging is opt-in:
-
-```bash
-export SWANLAB_API_KEY=...
-bash scripts/grpo.sh --logger swanlab
-```
+The [reproducibility guide](docs/reproducibility-v1.md) lists the remaining public hashes and checks. Private TaskFacts, model weights, and per-task traces are not README inputs.
 
 ## Documentation
 
-- [Data collection and dataset provenance](docs/data-collection.md)
-- [LoRA SFT](docs/sft.md)
-- [GRPO with veRL](docs/grpo.md)
-- [Held-out evaluation](docs/evaluation.md)
-- [Final-200 Clean evaluation dataset](docs/evaluation-dataset.md)
-- [Final-200 Benchmark Dashboard (historical)](docs/evaluation-dashboard.html)
+- [End-to-end architecture](docs/architecture.md)
+- [v1 data pipeline and curation](docs/data-pipeline-v1.md)
+- [v1 Final-200 results](docs/results-v1.md)
+- [v1 reproducibility](docs/reproducibility-v1.md)
+- [Limitations and follow-up work](docs/limitations.md)
 - [Reward v3 design](docs/reward-v3.md)
-- [Auditable experiment results](experiments/comparison.md)
+- [Evaluation implementation details](docs/evaluation.md)
 
-## References and acknowledgements
+## Sources and license status
 
-This tutorial builds on the
-[ShopSimulator paper](https://arxiv.org/pdf/2601.18225) and source project,
-[veRL](https://github.com/verl-project/verl), and
-[Qwen](https://github.com/QwenLM/Qwen3).
+This work builds on and attributes [YYHDBL/shopping-grpo-longhorizon](https://github.com/YYHDBL/shopping-grpo-longhorizon), [ShopSimulator](https://github.com/ShopAgent-Team/ShopSimulator), [veRL](https://github.com/verl-project/verl), and [Qwen](https://github.com/QwenLM/Qwen3). Consult each upstream project for its license and usage terms.
 
-The evaluation protocol and Benchmark construction were also informed by
-[VitaBench: Benchmarking LLM Agents with Versatile Interactive Tasks in Real-world Applications](https://arxiv.org/pdf/2509.26490)
-and
-[EComAgentBench: Benchmarking Shopping Agents on Long-Horizon Tasks with Distributed Hidden Intent](https://arxiv.org/pdf/2606.17698).
-
-The repository organization and tutorial presentation were informed by
-[qiqihezh/agentic-grpo-longhorizon](https://github.com/qiqihezh/agentic-grpo-longhorizon).
-Thanks to the [OpenCode Go plan](https://dev.opencode.ai/go) for supporting the
-development workflow.
-
-### Contributors
-
-<a href="https://github.com/Guochangwei917">
-  <img src="https://github.com/Guochangwei917.png?size=80" width="80px;" alt="Guochangwei917"/>
-</a>
+This repository currently has no root `LICENSE` file. Before redistributing code, environment data, or model weights, verify the terms for this repository and every upstream component. This README grants no additional license.

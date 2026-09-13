@@ -1,0 +1,16 @@
+{
+  "schema_version": "commerce-split-spec-v1",
+  "seed": 20260826,
+  "counts": {
+    "teacher_pool": 1300,
+    "grpo_train": 1000,
+    "grpo_validation": 50,
+    "final": 200
+  },
+  "allocation_order": [
+    "teacher_pool",
+    "grpo_train",
+    "grpo_validation"
+  ],
+  "leakage_contract": "commerce-leakage-contract-v1"
+}

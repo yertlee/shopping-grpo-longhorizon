@@ -10,7 +10,6 @@ import re
 from shopping_grpo.environment.product_id import PRODUCT_ID_CAPTURE
 from shopping_grpo.environment.tools import SHOP_TOOL_SCHEMAS, tool_call_to_action
 
-
 RUNTIME_GUARD_FIELD = "runtime_action_guard"
 NAVIGATION_BUTTONS = {
     "description",
@@ -93,7 +92,10 @@ def action_guard_tool_message(tool_call, reason, observation):
         return_tools.append("prev_page")
     if "back to search" in normalized_targets:
         return_tools.append("back_to_search")
-    only_return_buttons = bool(normalized_targets) and normalized_targets <= {"< prev", "back to search"}
+    only_return_buttons = bool(normalized_targets) and normalized_targets <= {
+        "< prev",
+        "back to search",
+    }
     if only_return_buttons:
         correction = f"你处于信息子页，下一步只能调用 {' 或 '.join(return_tools)}。"
     else:
@@ -112,14 +114,19 @@ def action_guard_tool_message(tool_call, reason, observation):
 
 def product_ids(observation):
     """提取当前 observation 中可打开的商品 ID，并保持出现顺序。"""
-    return list(
-        dict.fromkeys(
-            re.findall(
-                rf"(?m)^\d+\|({PRODUCT_ID_CAPTURE})\|",
-                observation,
-            )
-        )
+    # Structured observations expose products as ``rank|asin|...`` rows.  The
+    # simulator's legacy text observations expose the same targets as their own
+    # ``[SEP]`` segments, so both forms must feed the same action guard.
+    structured = re.findall(
+        rf"(?m)^\d+\|({PRODUCT_ID_CAPTURE})\|",
+        observation,
     )
+    raw_segments = (
+        segment.strip()
+        for segment in str(observation).split("[SEP]")
+    )
+    raw = [segment for segment in raw_segments if re.fullmatch(PRODUCT_ID_CAPTURE, segment)]
+    return list(dict.fromkeys([*structured, *raw]))
 
 
 def clickable_buttons(observation):

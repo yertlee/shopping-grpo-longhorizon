@@ -1,7 +1,7 @@
 """冻结 runtime contract 的集中式加载与验证（协议身份的权威来源）。
 
 本模块只依赖 stdlib。合同文件、canonical 口径与冻结值由项目侧生成器
-（commerce-agent-posttrain/src/commerce_posttrain/contracts/runtime.py）
+（src/commerce_posttrain/contracts/runtime.py）
 定义；这里复现其算法但不引入对项目仓库的运行时依赖。
 
 三种 hash 口径（指令书 §2）：
@@ -25,7 +25,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 # 冻结合同身份（指令书 §2）：declared == canonical == 该值。
-FROZEN_CONTRACT_SHA256 = "73855a719bc303fba3821cf215d8503b0cdef7bfc960a5d004d61ac320f11855"
+FROZEN_CONTRACT_SHA256 = "5f0967e9dd0cad5f8041484bdb70a6baaf6ee14e8df81f966bf77adbce6e1bac"
 FROZEN_SCHEMA_VERSION = "commerce-runtime-contract-v1"
 
 # 必需字段：缺失即失败（指令书 §3）。
@@ -325,28 +325,28 @@ def _validate_declared_hash(declared: Any) -> str:
 
 
 def _validate_field_types(contract: Mapping[str, Any]) -> None:
-    for field in FROZEN_FIELD_VALUES:
-        value = contract.get(field)
-        expected = FROZEN_FIELD_VALUES[field]
+    for field_name in FROZEN_FIELD_VALUES:
+        value = contract.get(field_name)
+        expected = FROZEN_FIELD_VALUES[field_name]
         if isinstance(expected, int):
             if not isinstance(value, int) or isinstance(value, bool) or value != expected:
                 raise RuntimeContractError(
-                    f"runtime contract {field} 必须等于冻结值 {expected}，got {value!r}"
+                    f"runtime contract {field_name} 必须等于冻结值 {expected}，got {value!r}"
                 )
         else:
             if value != expected:
                 raise RuntimeContractError(
-                    f"runtime contract {field} 必须等于冻结值 {expected!r}，got {value!r}"
+                    f"runtime contract {field_name} 必须等于冻结值 {expected!r}，got {value!r}"
                 )
-    for field in (
+    for field_name in (
         "tool_schema_hash",
         "system_prompt_hash",
         "observation_projection_hash",
     ):
-        value = contract.get(field)
+        value = contract.get(field_name)
         if not isinstance(value, str) or len(value) != 64:
             raise RuntimeContractError(
-                f"runtime contract {field} 必须是 64 位十六进制，got {value!r}"
+                f"runtime contract {field_name} 必须是 64 位十六进制，got {value!r}"
             )
 
 

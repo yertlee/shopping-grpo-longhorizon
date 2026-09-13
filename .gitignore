@@ -12,12 +12,23 @@ venv/
 *.egg-info/
 build/
 dist/
-.env
+.env*
+!.env.example
 *.log
 
+# Local/private experiment material. Keep the public repository source-only.
+data/private/
 outputs/
-checkpoints/
 models/
+checkpoints/
+logs/
+log/
+cache/
+.cache/
+
+# Claude local settings may contain machine- or account-specific state.
+.claude/settings.local.json
+.claude/*.local.*
+
 swanlog/
 wandb/
-logs/

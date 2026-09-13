@@ -58,7 +58,11 @@ def build_stage_commands(
         model = (
             base_model
             if stage == "a"
-            else _path_arg(Path(output_root) / f"stage-{STAGES[STAGES.index(stage) - 1]}" / "merged")
+            else _path_arg(
+                Path(output_root)
+                / f"stage-{STAGES[STAGES.index(stage) - 1]}"
+                / "merged"
+            )
         )
         train = [
             str(python),
@@ -120,7 +124,10 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-model", default="Qwen/Qwen3.5-2B")
     parser.add_argument(
-        "--source", type=Path, default=ROOT / "data/sft_pure_v4/all.jsonl"
+        "--source",
+        type=Path,
+        required=True,
+        help="authorized Pure V4 JSONL source (not published in this repository)",
     )
     parser.add_argument(
         "--manifest", type=Path, default=ROOT / "data/sft_curriculum/manifest.json"

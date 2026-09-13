@@ -7,13 +7,12 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import json
 import re
+from dataclasses import asdict, dataclass
 
 from shopping_grpo.environment.actions import clickable_buttons, product_ids
 from shopping_grpo.environment.product_id import PRODUCT_ID_CAPTURE, is_product_id
-
 
 FOOTER_MARKER = "\n\n搜索功能是否可用:"
 TRUNCATION_MARKER = "[TRUNCATED_BY_SHOPPING_PROJECTOR]"
@@ -79,6 +78,11 @@ def project_observation(
     raw_buttons = clickable_buttons(observation)
     raw_asins = product_ids(observation)
     page_type = _page_type(observation)
+    if page_type == "search_results" and len(raw_asins) > search_top_k:
+        raise ObservationProjectionError(
+            f"raw search page has {len(raw_asins)} products, above configured "
+            f"page capacity {search_top_k}"
+        )
     effective_budget = {
         "search_results": token_budget,
         "product_detail": detail_token_budget,
@@ -186,7 +190,10 @@ def _project_search_results(
         )
     body, footer = _split_footer(observation)
     segments = [segment.strip() for segment in body.split("[SEP]")]
-    page = next((segment for segment in segments if re.fullmatch(r"Page \d+.*", segment)), "Page unknown")
+    page = next(
+        (segment for segment in segments if re.fullmatch(r"Page \d+.*", segment)),
+        "Page unknown",
+    )
     products = []
     for index, segment in enumerate(segments):
         if not is_product_id(segment):

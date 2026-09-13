@@ -1,99 +1,62 @@
 # Data collection
 
-## Goal
+## Public boundary
 
-The SFT stage needs complete examples of a shopping agent using tools correctly:
-searching, opening products, inspecting evidence, choosing options and ending
-with a valid purchase. The repository contains the accepted action-only
-trajectories, not historical failed collection attempts.
+The public repository contains aggregate counts and manifests only. It does
+not contain raw Teacher responses or per-example SFT trajectories. Rebuild the
+SFT-ready rows from an authorized v1 source and keep all derived JSONL outside
+the repository.
 
-## How the dataset was produced
+## v1 collection and curation
 
-The current collection used ShopSimulator Environment v2.1, Reward v3 and
-`deepseek-v4-flash` as the teacher. It produced 2,498 raw trajectories.
-Every trajectory executed its actions in ShopSimulator during collection. The
-saved result was accepted only when Environment v2.1 returned a valid Reward v3
-gold purchase; no second model judged whether the trajectory succeeded.
+The v1 collection used ShopSimulator Environment v2.1, Reward v3, and
+`deepseek-v4-flash`. Every strategy attempt executed real environment actions;
+infrastructure retries preserve their attempt identity and are not new policy
+examples. Strict acceptance requires a complete `gold_purchase` terminal
+result with `reward_valid=true`.
 
-Collection audit:
-
-| Item | Value |
+| Item | Count |
 |---|---:|
-| Raw trajectories | 2,498 |
-| Accepted trajectories | 1,026 |
-| Acceptance rate | 41.07% |
-| Frozen rows used | 1,000 |
-| Unused accepted rows | 26 |
+| Valid strategy attempts | 2,100 |
+| Append-only raw rows | 2,370 |
+| Strict-gold trajectories | 1,343 |
+| Trajectories after hard acceptance | 1,265 |
+| Tasks with usable trajectories | 512 |
+| Curated train / dev / reserve | 400 / 100 / 12 |
+| SFT-ready train / dev | 398 / 100 |
 
-The frozen subset was split into 800 training and 200 validation rows. The two
-splits are task-disjoint and also have zero task-ID overlap with GRPO and the
-Final-200 evaluation set.
+The Outcome and Process arms use the same task set. Outcome selects the first
+strictly accepted trajectory; Process selects by actor-visible quality features
+using the fixed curation order. A shared length gate and difficulty-matched
+reserve reduce the curated train count from 400 to 398. No evaluation task is
+used for selection or tuning.
 
-## Frozen deliverables
+## Rebuild from an authorized source
 
-| File | Rows | SHA-256 |
-|---|---:|---|
-| `data/sft/train.jsonl` | 800 | `8c3a6ff0033f6ea672af609891e747d60652ddc17e8d3c8eacb19e9d96dd9477` |
-| `data/sft/validation.jsonl` | 200 | `9525cc2fb04a1d8d38ae2db959397da908dde3fea766f580fdcf77d1239533cc` |
-
-Raw teacher responses are intentionally not committed; their collection path
-is retained in `data/sft/metadata.json` as provenance.
-
-## Run a new collection
-
-Start ShopSimulator, configure an OpenAI-compatible Teacher endpoint, and run:
+Set `AUTHORIZED_DATA_ROOT` to the approved data location before running these
+commands. The placeholder is intentionally not a repository path.
 
 ```bash
-export OPENAI_BASE_URL=https://your-provider.example/v1
-export OPENAI_API_KEY=your-key
-
-python scripts/collect_sft_data.py \
-  --tasks data/grpo/train.jsonl \
-  --output-dir outputs/sft-collection \
-  --model deepseek-v4-flash \
-  --target-accepted 1000 \
-  --workers 4
+python scripts/curate_teacher.py \
+  --raw "$AUTHORIZED_DATA_ROOT/teacher/raw.jsonl" \
+  --tasks "$AUTHORIZED_DATA_ROOT/task_facts.jsonl" \
+  --output-dir outputs/teacher-curated \
+  --collected-task-count 512 \
+  --train-count 400 \
+  --dev-count 100
 ```
 
-`raw.jsonl` is the resumable source of truth. Running the same command again
-skips completed task attempts and rebuilds all derived files:
+Then run the length-gate/preflight workflow against that external output and
+write SFT-ready rows to another external directory. Review the generated
+manifest and hashes before any training run. The committed metadata and
+curriculum manifest are the public audit records; raw responses and derived
+rows remain outside Git.
 
-```text
-outputs/sft-collection/
-  raw.jsonl           complete Teacher responses and environment results
-  accepted.jsonl      strict Reward v3 gold trajectories
-  rejected.jsonl      task IDs and deterministic rejection reasons
-  reject_stats.json   aggregate acceptance audit
-  sft.jsonl           sanitized training rows before splitting
-  train.jsonl         task-disjoint training split
-  validation.jsonl    task-disjoint validation split
-  metadata.json       row counts, configuration and SHA-256 hashes
-```
+## Publication rule
 
-The command removes all task IDs listed in `data/evaluation/tasks.jsonl` before
-collection and checks again while building artifacts. It also keeps at most one
-accepted trajectory per task. To rebuild the derived files without contacting
-the Teacher or environment, run:
-
-```bash
-python scripts/collect_sft_data.py \
-  --build-only \
-  --output-dir outputs/sft-collection
-```
-
-Only copy `train.jsonl`, `validation.jsonl` and their metadata into `data/sft/`
-after reviewing the collection audit. Raw Teacher responses remain in
-`outputs/` and should not be committed.
-
-## What a training row contains
-
-Each JSONL row is a chat trajectory with:
-
-- the shopping instruction;
-- assistant tool calls;
-- ShopSimulator tool observations;
-- the final terminal action;
-- metadata tying the row to Environment v2.1 and Reward v3.
-
-During SFT, user and tool tokens are masked. Loss is computed only on assistant
-actions. See [SFT](sft.md) for the exact training recipe.
+Raw collection output is resumable and may include complete Teacher responses,
+environment observations, rejection reasons, and derived SFT rows. Those
+artifacts stay in the authorized output area and are never copied into this
+repository. During training, user and tool tokens are masked and loss is
+computed only on assistant actions. See [SFT](sft.md) for the recipe and the
+committed metadata/manifests for aggregate audit values.

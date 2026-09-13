@@ -1,9 +1,19 @@
-"""不依赖 veRL 安装的最小适配层单测。"""
+"""veRL adapter tests (run when the optional GRPO dependency is installed)."""
 
 import asyncio
+import importlib.util
 import threading
 import unittest
 from unittest.mock import patch
+
+# The adapter subclasses veRL's ToolAgentLoop.  Keep the whole module out of
+# collection when the optional GRPO stack is not installed; importing the
+# veRL base classes first would otherwise turn an optional dependency into a
+# hard collection error.
+if importlib.util.find_spec("verl") is None:
+    raise unittest.SkipTest(
+        "veRL adapter tests require the optional shopping-grpo[grpo] dependency"
+    )
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput
 from verl.experimental.agent_loop.tool_agent_loop import ToolAgentLoop
@@ -142,7 +152,13 @@ class VerlAdapterRuntimeTest(unittest.TestCase):
 
     def test_terminal_reward_only_uses_a_normal_environment_completion(self):
         done = make_runtime_state(task_id=1, max_steps=35)
-        done.update({"done": True, "terminal_result": {"done": True, "over": True}, "final_reward": 0.75})
+        done.update(
+            {
+                "done": True,
+                "terminal_result": {"done": True, "over": True},
+                "final_reward": 0.75,
+            }
+        )
         self.assertEqual(terminal_reward(done), 0.75)
 
         unfinished = make_runtime_state(task_id=1, max_steps=35)
@@ -462,7 +478,13 @@ class VerlAdapterRuntimeTest(unittest.TestCase):
         async def run():
             session = ShopSimulatorSession(max_steps=35, env_factory=FakeEnv)
             state = await session.start(task_id=8)
-            state.update({"done": True, "terminal_result": {"done": True, "over": True}, "final_reward": 1.0})
+            state.update(
+                {
+                    "done": True,
+                    "terminal_result": {"done": True, "over": True},
+                    "final_reward": 1.0,
+                }
+            )
             self.assertEqual(terminal_reward(state), 1.0)
             await session.close()
 

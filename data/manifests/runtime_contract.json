@@ -1,0 +1,51 @@
+{
+  "action_guard_hash": "2b8289a77fd3b1da022d4ba32869ccaa396cc77c243635373dde22a6baec805b",
+  "attempts_per_task": 3,
+  "context_safety_margin": 512,
+  "context_window": 24576,
+  "contract_sha256": "5f0967e9dd0cad5f8041484bdb70a6baaf6ee14e8df81f966bf77adbce6e1bac",
+  "environment_version": "shopsimulator-environment-v2.1",
+  "max_generated_tokens_per_turn": 512,
+  "max_steps": 35,
+  "observation_detail_tokens": 4096,
+  "observation_generic_tokens": 768,
+  "observation_projection_contract": "shopping-observation-v2",
+  "observation_projection_hash": "1bf71c6523212857e39819feb3b343b944b02d04bb2f0541a708be434950df54",
+  "observation_search_tokens": 1536,
+  "observation_search_top_k": 20,
+  "observation_version": "shopping-observation-v2",
+  "process_analyzer_hash": "54a97b31e494ad2d0b8b0e850009808dbc4104a62ff857130ff1a32d269d4a65",
+  "process_contract": {
+    "evidence_source": "actor_visible_observation_only",
+    "features_hash": "bb350fbb6172b813bebc2b71101d97b6008351a24b6735ebf3039f2404662f11",
+    "selection_order": [
+      "guard_rejections",
+      "malformed_calls",
+      "schema_rejections",
+      "missing_required_detail_types",
+      "repeat_actions",
+      "no_progress_actions",
+      "steps_after_decision_ready",
+      "attempt_index"
+    ],
+    "version": "commerce-process-contract-v1"
+  },
+  "product_data_hash": "57b10950a0064d16c81535a1d764a75879a508d250dde8a2a1787c5e6045559f",
+  "reward_version": "shopsimulator-reward-v3",
+  "schema_version": "commerce-runtime-contract-v1",
+  "search_config_hash": "7f53e427d8302b8ab236428f43e5a59aa2d8f0859a5f2e87869e750479fe6e01",
+  "search_version": "shopsimulator-multifield-bm25-v2",
+  "shopsimulator_commit": "9ecba272963960ab4a10e1a781bd05cd7634ce20",
+  "system_prompt_hash": "674763bfc136849045b520b47290104ebbcb024fa5430104cefe86b32db247fd",
+  "teacher": {
+    "model": "deepseek-v4-flash",
+    "temperature": 0.7,
+    "thinking": false,
+    "top_p": 0.9
+  },
+  "tool_schema_hash": "9eccfc80db97f7fb9b34eea2f2f65f0b8bcb9bae76d8c2ee031db99c435ee1ad",
+  "tool_version": "shopping-tools-v2",
+  "upstream_commit": "4ed73020e1d7d07eb93e7375a4606b0901d3cded",
+  "upstream_repository": "https://github.com/YYHDBL/shopping-grpo-longhorizon.git",
+  "upstream_source_manifest_hash": "9b8117408cd7230bd0b6dd5faa7c1867f1d5d51f4d3bbe6850b698470f78af28"
+}

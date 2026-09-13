@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """从冻结 split manifest / task facts 构建 GRPO train/validation 数据与 metadata。
 
-输入全部来自阶段 A 冻结证据链（commerce-agent-posttrain 侧 manifest），本脚本只
+输入全部来自本仓库阶段 A 的冻结证据链（data/manifests 下的 manifest），本脚本只
 消费、不重建：split manifest 提供 grpo_train / grpo_validation / final /
 teacher_pool 池，task facts 提供每题的公开 instruction（query），reachability
 manifest 提供不可达任务的冻结排除原因。
 
-硬性保护（HANDOFF_TRAINING_IMPLEMENTATION_GAPS §6.3）：
+硬性保护：
 - 每个 split 的 task_id 唯一，且 Train/Validation/Final/teacher_pool/SFT 无交集；
   SFT 泄漏检查是强制的：正式构建必须显式提供四个 SFT JSONL（Process/Outcome 两臂
   × Train/Dev）；不提供时构建直接失败，显式

@@ -1,15 +1,21 @@
-# Data
+# Data and publication boundary
 
-Only the datasets used by the tutorial are kept here.
+The public tree contains aggregate metadata and reproducibility manifests for
+the SFT collection. It does not publish per-example training trajectories.
+SFT-ready rows must be rebuilt from an authorized data source at run time and
+kept in an external output directory; no checked-in command assumes that a
+removed row file exists.
 
-| Stage | Files | Rows |
+| Stage | Public artifact | Aggregate count |
 |---|---|---:|
-| SFT | `sft/train.jsonl`, `sft/validation.jsonl` | 800 / 200 |
-| GRPO | `grpo/train.parquet`, `grpo/validation.parquet` | 1000 / 50 |
-| Evaluation | `evaluation/tasks.jsonl` (Final-200 Clean) | 200 |
+| SFT | `sft/metadata.json`, `sft_curriculum/manifest.json`, `sft_pure_v4/metadata.json` | 398 train / 100 dev ready |
+| GRPO | `grpo/train.parquet`, `grpo/validation.parquet` and metadata | 1000 / 50 tasks |
+| Evaluation | `evaluation/tasks.jsonl` (Final-200 Clean) and metadata | 200 tasks |
 
-Adjacent `metadata.json` files record SHA256 checksums and collection
-provenance. All SFT, GRPO and evaluation splits are task-disjoint. Generated
-trajectories belong under `outputs/`, never under `data/`. Use
-`scripts/collect_sft_data.py` to create a new audited SFT dataset before
-promoting its train/validation files into this directory.
+The SFT metadata records collection, curation, and split counts without raw
+payloads. The curriculum manifest records the frozen task-set identity and
+stage counts; its source is an authorized, externally supplied dataset. All
+published splits remain task-disjoint. Generated trajectories belong under
+`outputs/`, never under `data/`. See
+[`docs/data-collection.md`](../docs/data-collection.md) for the v1 rebuild
+contract.

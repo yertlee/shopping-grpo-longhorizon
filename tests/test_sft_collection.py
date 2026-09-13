@@ -174,17 +174,24 @@ class SftCollectionTests(unittest.TestCase):
                 collection_config={"model": "teacher-test"},
             )
 
-            train = [json.loads(line) for line in (output / "train.jsonl").read_text().splitlines()]
+            train = [
+                json.loads(line)
+                for line in (output / "train.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
             validation = [
                 json.loads(line)
-                for line in (output / "validation.jsonl").read_text().splitlines()
+                for line in (output / "validation.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
             ]
             rejected_rows = [
                 json.loads(line)
-                for line in (output / "rejected.jsonl").read_text().splitlines()
+                for line in (output / "rejected.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
             ]
             metadata_exists = (output / "metadata.json").exists()
-            metadata = json.loads((output / "metadata.json").read_text())
+            metadata = json.loads((output / "metadata.json").read_text(encoding="utf-8"))
 
         train_ids = {row["task_id"] for row in train}
         validation_ids = {row["task_id"] for row in validation}

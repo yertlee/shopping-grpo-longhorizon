@@ -10,14 +10,15 @@ variants and terminate.
 ## Inputs
 
 - Base model: `Qwen/Qwen3.5-2B`
-- Main data: `data/sft_pure_v4/all.jsonl` (1,192 rows)
+- Main data: an authorized Pure V4 JSONL source (1,192 rows; not published)
 - Fixed curriculum manifest: `data/sft_curriculum/manifest.json`
 - Gradient rows: 1,073; development rows: 119; Final evaluation overlap: 0
 - Target: assistant tokens only; user and tool-observation tokens are masked
 
-The source and label hashes, exact task IDs, stage definitions, and review-only
-flags are frozen in the curriculum manifest. The older `data/sft/` split is
-kept only for reproducing the historical baseline.
+The source and label hashes, split identity, stage definitions, and review-only
+flags are frozen in the curriculum manifest. Per-example source rows must be
+provided from an authorized data store at run time; the public tree keeps only
+aggregate metadata and manifests.
 
 ## Run
 
@@ -25,10 +26,10 @@ After `bash scripts/setup.sh`:
 
 ```bash
 # Check all six train/merge commands without loading a model.
-bash scripts/sft_curriculum.sh --dry-run
+bash scripts/sft_curriculum.sh --source /path/to/authorized/sft-pure-v4.jsonl --dry-run
 
 # Run A -> B -> C on the server.
-bash scripts/sft_curriculum.sh --swanlab
+bash scripts/sft_curriculum.sh --source /path/to/authorized/sft-pure-v4.jsonl --swanlab
 ```
 
 The launcher trains a LoRA adapter and then merges it with the base model:

@@ -121,7 +121,12 @@ def _validate_settings(stage: str, settings: dict) -> None:
         raise ValueError("ppo_mini_batch_size must be divisible by ppo_micro_batch_size")
     if settings["clip_mode"] not in {"symmetric", "clip_higher"}:
         raise ValueError("clip_mode must be symmetric or clip_higher")
-    if min(float(settings["kl_coefficient"]), float(settings["length_penalty_per_step"]), float(settings["max_length_penalty"])) < 0:
+    penalty_coefficients = (
+        float(settings["kl_coefficient"]),
+        float(settings["length_penalty_per_step"]),
+        float(settings["max_length_penalty"]),
+    )
+    if min(penalty_coefficients) < 0:
         raise ValueError("KL and length penalty coefficients must be non-negative")
 
 
@@ -147,6 +152,10 @@ def build_experiment(
     output = output_root / experiment["name"]
     settings = experiment["settings"]
     if experiment["stage"] == "sft":
+        if train_data is None or validation_data is None:
+            raise ValueError(
+                "SFT experiments require authorized external train_data and validation_data"
+            )
         revision = revision or settings.get("revision", FROZEN_MODEL_REVISION)
         validate_model_revision(revision)
     environment = dict(os.environ)
@@ -163,8 +172,8 @@ def build_experiment(
             "scripts/train_lora_sft.py",
             "--model", str(model or "Qwen/Qwen3.5-2B"),
             "--revision", revision,
-            "--train", str(train_data or root / "data/sft/train.jsonl"),
-            "--validation", str(validation_data or root / "data/sft/validation.jsonl"),
+            "--train", str(train_data),
+            "--validation", str(validation_data),
             "--output", str(output),
             "--learning-rate", str(settings["learning_rate"]),
             "--epochs", str(settings["epochs"]),
@@ -246,7 +255,12 @@ def main() -> None:
         validation_data=args.validation_data,
         revision=args.revision,
     )
-    print(json.dumps({"experiment": experiment, "command": command, "output": str(output)}, indent=2))
+    print(
+        json.dumps(
+            {"experiment": experiment, "command": command, "output": str(output)},
+            indent=2,
+        )
+    )
     if args.dry_run:
         return
     if output.exists() and any(output.iterdir()):

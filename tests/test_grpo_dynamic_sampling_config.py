@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,7 +17,16 @@ from scripts.check_grpo_runtime import (
     validate_training_memory_budget,
 )
 
+_GRPO_CONFIG_AVAILABLE = all(
+    importlib.util.find_spec(module) is not None
+    for module in ("hydra", "verl")
+)
 
+
+@unittest.skipUnless(
+    _GRPO_CONFIG_AVAILABLE,
+    "GRPO configuration tests require the optional shopping-grpo[grpo] dependencies",
+)
 class DynamicSamplingConfigTest(unittest.TestCase):
     def test_training_memory_budget_enforces_real_micro_batch_one(self):
         config = compose_runtime_config([])

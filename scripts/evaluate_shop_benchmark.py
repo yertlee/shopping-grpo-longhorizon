@@ -3,7 +3,7 @@
 
 这是历史入口：只写 raw trajectory 与旧 summary，未接入统一 rubric/judge
 contract、blind guard、cache/resume 与 paired statistics。
-commerce-agent-posttrain 实验的正式评测入口是 scripts/evaluate_student.py
+本仓库 M0–M3 的正式评测入口是 scripts/evaluate_student.py
 （见 WP1）；本脚本不得作为 M0–M3 的正式评测结果来源。
 """
 

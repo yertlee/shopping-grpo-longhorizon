@@ -2,7 +2,7 @@
 
 ## 目标
 
-将 `data/sft_pure_v4/all.jsonl` 作为唯一 SFT 主数据源，在不启动训练的前提下，
+将授权数据源中的 Pure V4 轨迹池作为唯一 SFT 主数据源，在不启动训练的前提下，
 准备可在服务器上一条命令执行的质量审计、固定划分和三阶段课程训练。
 
 ## 质量合同
@@ -52,7 +52,7 @@ Stage C merged checkpoint 是 GRPO 的唯一 SFT 起点。Stage A/B 只是可审
 ## 服务器执行合同
 
 ```bash
-bash scripts/sft_curriculum.sh
+bash scripts/sft_curriculum.sh --source /path/to/authorized/sft-pure-v4.jsonl
 ```
 
 该命令依次完成 A/B/C 训练和 adapter merge。支持 `--dry-run`、从某阶段继续、

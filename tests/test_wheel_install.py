@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import shutil
@@ -11,11 +10,22 @@ import sys
 import tempfile
 import unittest
 import venv
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+
+try:
+    version("build")
+except PackageNotFoundError:
+    _BUILD_FRONTEND_AVAILABLE = False
+else:
+    _BUILD_FRONTEND_AVAILABLE = True
 
 
 @unittest.skipUnless(
-    importlib.util.find_spec("build"),
+    # A repository-level ``build/`` directory is a valid setuptools output
+    # directory but not the PyPA ``build`` frontend.  Check package metadata so
+    # it cannot make this optional test run and fail during collection.
+    _BUILD_FRONTEND_AVAILABLE,
     "the wheel test requires the dev extra",
 )
 class WheelInstallTest(unittest.TestCase):
@@ -37,12 +47,14 @@ class WheelInstallTest(unittest.TestCase):
                 check=True,
                 capture_output=True,
                 text=True,
+                cwd=temporary,
             )
             wheel = next(dist.glob("shopping_grpo-*.whl"))
             environment = temporary / "venv"
             binary_directory = "Scripts" if os.name == "nt" else "bin"
-            python = environment / binary_directory / "python"
-            cli = environment / binary_directory / "shopping-grpo"
+            executable_suffix = ".exe" if os.name == "nt" else ""
+            python = environment / binary_directory / f"python{executable_suffix}"
+            cli = environment / binary_directory / f"shopping-grpo{executable_suffix}"
             uv = shutil.which("uv")
             if uv:
                 subprocess.run(

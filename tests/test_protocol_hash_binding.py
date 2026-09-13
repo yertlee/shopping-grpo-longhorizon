@@ -1,7 +1,7 @@
 """protocol_hash 冻结合同绑定测试（指令书 §8 负向矩阵）。
 
 所有 fixture 使用完整、canonical 自洽的冻结合同（tests/fixtures/runtime_contract.json，
-内容与 data/manifests/runtime_contract.json 逐字节一致，contract_sha256 == 73855a71…）。
+内容与 data/manifests/runtime_contract.json 逐字节一致，contract_sha256 == 5f0967e9…）。
 
 要求：SYSTEM_PROMPT、tool schema、projection contract/code、reward、max_steps、
 context 系列、temperature/top_p、runtime contract 中任一漂移 → protocol_hash 必须
@@ -22,7 +22,6 @@ from shopping_grpo.evaluation.runtime_contract import (
     ValidatedRuntimeContract,
     canonical_json_bytes,
     compute_runtime_contract_canonical_sha256,
-    compute_runtime_contract_file_sha256,
     load_and_validate_runtime_contract,
     thaw_runtime_value,
 )
@@ -124,14 +123,15 @@ class ContractLoadingTest(unittest.TestCase):
             contract["reward_version"] = "shopsimulator-reward-v4"
             contract["contract_sha256"] = compute_runtime_contract_canonical_sha256(contract)
             path = write_contract_copy(Path(tmp), contract)
-            with self.assertRaises(RuntimeContractError):  # 偏离冻结身份 73855a71…
+            with self.assertRaises(RuntimeContractError):  # 偏离冻结身份 5f0967e9…
                 load_and_validate_runtime_contract(path)
 
     def test_canonical_identity_is_path_independent(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            copy_a = write_contract_copy(tmp, json.loads(FIXTURE.read_text(encoding="utf-8")), "a.json")
-            copy_b = write_contract_copy(tmp, json.loads(FIXTURE.read_text(encoding="utf-8")), "b.json")
+            fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+            copy_a = write_contract_copy(tmp, fixture, "a.json")
+            copy_b = write_contract_copy(tmp, fixture, "b.json")
             a = load_and_validate_runtime_contract(copy_a)
             b = load_and_validate_runtime_contract(copy_b)
             self.assertEqual(a.canonical_sha256, b.canonical_sha256)
@@ -406,7 +406,6 @@ class StartupRejectionTest(unittest.TestCase):
                     )
 
     def test_same_hash_tool_schema_injection_is_rejected(self):
-        import copy
         from shopping_grpo.environment.tools import SHOP_TOOL_SCHEMAS
 
         contract = load_full_contract()

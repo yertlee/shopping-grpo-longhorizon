@@ -40,21 +40,9 @@ Rubric 只需要为每个任务生成一次；它不依赖某个 Actor 的轨迹
 
 ## 2. Benchmark 中的一条 Test
 
-正式 Final-200 Clean 文件只公开任务 ID，防止将盲测 Query 或目标商品意外送入训练流程：
-
-```json
-{"task_id": 8187}
-```
-
-开始评估后，代码按这个 ID 从冻结的 ShopSimulator goal 顺序中恢复私有 TaskFacts。
-这条任务的 Query 是：
-
-> 求一对卡通-永结同心款的高档酒红色木梳，希望配备礼盒，能作为新娘结婚的陪嫁
-> 物品，价格在20元左右。
-
-TaskFacts 还包含目标商品的 category、title、brand、pricing、attributes、
-customization options，以及 Reward v3 已编译的结构化需求。它们用于生成候选约束，
-但目标商品私有字段不会进入 Actor，也不会直接进入 Pro Judge。
+正式 Final-200 Clean 文件只公开去标识化的评测输入；盲测 Query、目标商品和
+TaskFacts 由授权评测环境在运行时恢复，不进入公开训练数据或本页。TaskFacts
+仅用于生成候选约束，目标商品私有字段不会进入 Actor，也不会直接进入 Pro Judge。
 
 Final-200 Clean 的约束如下：
 
@@ -86,8 +74,8 @@ Final-200 Clean 的约束如下：
 每个候选都有固定的 `candidate_id`、字段、操作符、期望值、hardness hint、Query
 span、数据来源和 selection guidance。V4 Flash 无权创造新的底层字段、操作符或值。
 
-示例 task 8187 的代码候选共有 7 条：品类、高档、结婚、陪嫁、卡通-永结同心、
-“【卡通-永结同心】2个装”选项，以及“20 元左右”的价格偏好。
+代码会为每个任务生成候选约束，覆盖品类、功能、规格、选项和价格等字段；本页
+不复制任何私有任务 ID、Query 或原始 payload。
 
 ### 3.2 V4 Flash 的完整 System Prompt
 
@@ -141,15 +129,8 @@ hard/soft 规则：
 不要输出 Markdown、解释性前后缀或任何额外字段。
 ```
 
-V4 Flash 实际收到的 User 消息只有：
-
-```json
-{
-  "task_id": 8187,
-  "query": "求一对卡通-永结同心款的高档酒红色木梳……价格在20元左右。",
-  "candidates": ["代码生成的完整候选数组"]
-}
-```
+V4 Flash 实际收到的 User 消息只有当前任务的去标识化 Query 和代码生成的候选数组；
+具体任务 ID、Query 和候选值不属于公开文档。
 
 ### 3.3 代码再次收口
 
@@ -166,7 +147,7 @@ Flash 返回后，代码会检查：
 不会放宽约束或生成默认 Rubric。最终 Rubric 按 `task_id` 缓存，Baseline、SFT、
 GRPO 共用同一份。
 
-示例 task 8187 最终从 7 条候选中选出 5 条：
+每个任务最终从候选中选出冻结的 Rubric 条目：
 
 | Rubric | Hardness | 要求 |
 |---|---|---|
@@ -198,9 +179,8 @@ GRPO 共用同一份。
 一次 Rollout 会保存用户 Query、Assistant 文本、工具调用、Actor 实际看到的投影后
 Observation、Guard 拒绝、每步状态、终局结果和基础审计信息。
 
-示例 task 8187 的 SFT Actor 共执行 10 步：搜索一次、打开一个候选、查看
-Description/Features/Reviews、选择“【卡通-永结同心】2个装”、确认 variant
-价格为 9 元并购买。
+Actor Rollout 的具体 Query、商品、动作和 Observation 属于评测运行产物，不在公开
+文档中复制；公开结果只保留固定分母的聚合统计。
 
 ## 5. 代码硬检查
 
@@ -297,18 +277,17 @@ Pro 还要逐条输出每个 Rubric 的
 taxonomy 中给出 primary/secondary errors。代码随后验证 Rubric IDs 和 event IDs
 必须真实存在，五个维度必须齐全且只能为 0/1/2，禁止 Pro 输出总分。
 
-示例 task 8187 的 SFT 轨迹得到：
+有效轨迹的 Judge 结果按以下五个维度分别报告：
 
-| 维度 | 分数 | 主要理由 |
+| 维度 | 分数 | 评价面板 |
 |---|---:|---|
-| Search Strategy | 2 | 搜索覆盖卡通、永结同心、木梳、礼盒和酒红色 |
-| Candidate Utilization | 1 | 所选商品合理，但只打开一个候选，比较不足 |
-| Evidence Verification | 1 | 规格和价格已确认，但详情页证据有限 |
-| Decision Quality | 2 | 硬约束、选项和预算均满足 |
-| Termination Efficiency | 2 | 10 步内完成，无无效循环 |
+| Search Strategy | 0/1/2 | 搜索覆盖和改写质量 |
+| Candidate Utilization | 0/1/2 | 候选利用与必要比较 |
+| Evidence Verification | 0/1/2 | 购买前关键证据核验 |
+| Decision Quality | 0/1/2 | 商品、规格与决策质量 |
+| Termination Efficiency | 0/1/2 | 及时终止与无效探索 |
 
-五条 Rubric 均被判为 `satisfied`，没有 primary error。每一项结论都引用轨迹中的
-`e0001`–`e0010` 事件，而不是引用隐藏 Gold。
+每项结论都引用轨迹中的稳定事件 ID，而不是引用隐藏 Gold；逐题结果和事件内容不公开。
 
 ## 7. 最后统计什么？
 
@@ -351,15 +330,24 @@ Reward 与 Rubric 冲突时两者都保留。例如 Reward 判为 gold，但 Rub
 统计成功状态迁移、Reward type 迁移、hard violation 差值、五维分数差值、步数、
 Guard 和重复动作变化；仍然不生成一个综合总分。
 
-正式运行的 Pro Judge 覆盖率为：
+## 8. M0–M3 Final-200 当前聚合结果
 
-| Actor | Valid Judge | Not judged | Coverage |
-|---|---:|---:|---:|
-| Baseline | 198 | 2 | 99.0% |
-| SFT | 195 | 5 | 97.5% |
-| GRPO step 100 | 195 | 5 | 97.5% |
+四个里程碑在同一份 Final-200 Clean 上各运行一次，每题一次 rollout，固定分母为
+200。严格成功只计完整 `gold_purchase` 且 `reward_valid=true` 的终局；基础设施无效
+任务仍保留在分母中。公开结果仅包含聚合值：
 
-## 8. 代码与产物
+| Milestone | Strict gold success | Infrastructure invalid | Mean steps | Mean terminal utility |
+|---|---:|---:|---:|---:|
+| M0 Base | 2/200 (1.0%) | 2 | 5.40 | -0.100 |
+| M1 Outcome SFT | 137/200 (68.5%) | 3 | 12.05 | +0.584 |
+| M2 Process SFT | 130/200 (65.0%) | 4 | 11.50 | +0.553 |
+| M3 GRPO step50 export | 131/200 (65.5%) | 2 | 11.05 | +0.563 |
+
+配对严格成功差异为 M0→M1 +67.5pp（p<0.0001）、M1→M2 −3.5pp（p=0.230）、
+M2→M3 +0.5pp（p=1.000）。GRPO 正式合同为 500 training steps；本次在 optimizer
+step 100 通过受控 barrier 停止，并选择 step 50 导出 M3。该结果不外推到其他配方。
+
+## 9. 代码与产物
 
 当前实现按职责拆分在：
 
@@ -392,5 +380,5 @@ MODEL/evaluation_summary.json
 model_comparison.json
 ```
 
-完整轨迹和 Judge 请求可能体积较大，因此属于 `outputs/` 运行产物；Git 中只提交
-紧凑的配置与结果摘要。
+完整轨迹和 Judge 请求可能体积较大且含敏感 payload，因此属于授权环境的 `outputs/`
+运行产物；Git 中只提交紧凑的配置与聚合结果摘要。

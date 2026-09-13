@@ -1,8 +1,9 @@
 # Pure V4 SFT curriculum
 
-`manifest.json` is the single training list for the active SFT recipe. It pins
-the SHA256 of Pure V4, difficulty labels, and the evaluation task file; records
-every train/development `task_id`; and keeps the three stages reproducible.
+`manifest.json` is the public curriculum manifest for the active SFT recipe.
+It pins the authorized Pure V4 source identity, difficulty labels, and the
+evaluation task file; records the split and stage counts; and keeps the three
+stages reproducible without publishing trajectory payloads.
 
 | Stage | Included buckets | Train | Development | Epoch | LR |
 |---|---|---:|---:|---:|---:|
@@ -42,10 +43,12 @@ or log per-task exposure counts before changing the curriculum. Do not fix this
 by blindly duplicating hard rows, since that would introduce the same synthetic
 reweighting problem in another form.
 
-Regenerate and audit the list after changing either source file:
+Regenerate and audit the manifest after supplying the authorized source:
 
 ```bash
-.venv/bin/python scripts/prepare_sft_curriculum.py
+.venv/bin/python scripts/prepare_sft_curriculum.py \
+  --source /path/to/authorized/sft-pure-v4.jsonl \
+  --labels data/sft_pure_v4/difficulty_labels.jsonl
 git diff -- data/sft_curriculum/manifest.json
 ```
 
@@ -53,8 +56,8 @@ Server use:
 
 ```bash
 bash scripts/setup.sh
-bash scripts/sft_curriculum.sh --dry-run
-bash scripts/sft_curriculum.sh --swanlab
+bash scripts/sft_curriculum.sh --source /path/to/authorized/sft-pure-v4.jsonl --dry-run
+bash scripts/sft_curriculum.sh --source /path/to/authorized/sft-pure-v4.jsonl --swanlab
 ```
 
 如服务器使用外部虚拟环境，可设置
@@ -71,6 +74,7 @@ To resume an interrupted stage, point at its Transformers checkpoint:
 ```bash
 bash scripts/sft_curriculum.sh \
   --start-stage b \
+  --source /path/to/authorized/sft-pure-v4.jsonl \
   --resume-from-checkpoint outputs/models/sft-curriculum/stage-b/adapter/checkpoint-100 \
   --swanlab
 ```
