@@ -13,7 +13,7 @@ and a fixed denominator of 200.
 | M0 Base | 2/200 | 1.0% | 2 | 5.40 | −0.100 |
 | M1 Outcome SFT | 137/200 | 68.5% | 3 | 12.05 | +0.584 |
 | M2 Process SFT | 130/200 | 65.0% | 4 | 11.50 | +0.553 |
-| M3 GRPO step50 export | 131/200 | 65.5% | 2 | 11.05 | +0.563 |
+| M3 GRPO step100 export | 139/200 | 69.5% | 2 | 11.25 | +0.602 |
 
 ## Paired strict-success comparisons
 
@@ -24,15 +24,16 @@ intervals are paired bootstrap 95% CIs.
 |---|---:|---:|---:|---|
 | M0 → M1 | +67.5pp | 0 / 135 | <0.0001 | [+0.589, +0.776] |
 | M1 → M2 | −3.5pp | 16 / 9 | .230 | [−0.100, +0.038] |
-| M2 → M3 | +0.5pp | 6 / 7 | 1.000 | [−0.040, +0.061] |
+| M2 → M3 | +4.5pp | 7 / 16 | .093 | — |
 
 ## Interpretation
 
 SFT is the main source of the observed gain. Process selection does not beat
 Outcome. Under the frozen GRPO recipe (`lr=1e-6`, LoRA `r=16`, four rollouts
 per prompt, `total_training_steps=500`, `save_freq=50`) and this run's
-controlled stop at optimizer step 100, the step50 export produced no detectable
-gain over M2. Infrastructure-invalid results are retained in the denominator;
+controlled stop at optimizer step 100, the step100 export improved over M2 by
+4.5pp. The direction is positive, while exact McNemar p=.093 does not reach the
+0.05 significance level. Infrastructure-invalid results are retained in the denominator;
 they are `not_judged` in the judge panel.
 
 For the full public result narrative, see [`docs/results-v1.md`](../docs/results-v1.md).

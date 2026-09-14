@@ -18,7 +18,7 @@ flowchart TD
   O --> M1[M1]
   P --> M2[M2]
   M2 --> G[veRL online GRPO]
-  G --> M3[M3 step50 export]
+  G --> M3[M3 step100 export]
   L --> E[Final-200 Clean]
   E --> R[M0 / M1 / M2 / M3 rollouts]
   R --> J[hard checks + rubric/judge]
