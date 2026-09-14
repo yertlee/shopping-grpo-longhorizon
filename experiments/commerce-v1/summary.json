@@ -12,7 +12,6 @@
       "strict_successes": 2,
       "sample_count": 200,
       "strict_success_rate": 0.01,
-      "mean_steps": 5.40,
       "terminal_utility": -0.1,
       "infrastructure_invalid": 2
     },
@@ -21,7 +20,6 @@
       "strict_successes": 137,
       "sample_count": 200,
       "strict_success_rate": 0.685,
-      "mean_steps": 12.05,
       "terminal_utility": 0.584,
       "infrastructure_invalid": 3
     },
@@ -30,18 +28,15 @@
       "strict_successes": 130,
       "sample_count": 200,
       "strict_success_rate": 0.65,
-      "mean_steps": 11.50,
       "terminal_utility": 0.553,
       "infrastructure_invalid": 4
     },
     {
       "name": "M3",
-      "checkpoint_step": 100,
-      "strict_successes": 139,
+      "strict_successes": 131,
       "sample_count": 200,
-      "strict_success_rate": 0.695,
-      "mean_steps": 11.25,
-      "terminal_utility": 0.602,
+      "strict_success_rate": 0.655,
+      "terminal_utility": 0.563,
       "infrastructure_invalid": 2
     }
   ],
@@ -55,14 +50,11 @@
       "p_value": 0.230
     },
     "M2_to_M3": {
-      "delta_percentage_points": 4.5,
-      "discordant_regressions": 7,
-      "discordant_improvements": 16,
-      "p_value": 0.093139648438
+      "delta_percentage_points": 0.5,
+      "p_value": 1.000
     }
   },
-  "model_identity": {
-    "M3_checkpoint": "global_step_100",
-    "training_recipe": "commerce-v1-grpo"
+  "weights": {
+    "M3_sha256": "e36b7a2a6029860eb17d278f186c2887f5fbc6adaed2ca2431a668aa26dadc34"
   }
 }

@@ -15,9 +15,9 @@ Frozen Final-200 Clean results use a fixed denominator of 200:
 | M0 Base | 2/200 (1.0%) |
 | M1 Outcome SFT | 137/200 (68.5%) |
 | M2 Process SFT | 130/200 (65.0%) |
-| M3 GRPO (step-100 export) | 139/200 (69.5%) |
+| M3 GRPO (step-50 export) | 131/200 (65.5%) |
 
-SFT supplies the main gain (M0→M1 **+67.5pp, p<0.0001**). Process selection does not beat Outcome (M1→M2 **−3.5pp, p=.230**). Under `lr=1e-6`, LoRA `r=16`, and `n=4` rollouts per prompt, GRPO step100 improved over M2 by **+4.5pp** (16 wins, 7 losses; two-sided exact McNemar **p=.093**), a positive direction that does not reach the 0.05 significance level. The GRPO contract is `total_training_steps=500` with `save_freq=50`; this run stopped at 100 optimizer steps and exported step100. Infrastructure invalidity is 1–2%, above the project’s `<1%` target, and remains in the denominator.
+SFT supplies the main gain (M0→M1 **+67.5pp, p<0.0001**). Process selection does not beat Outcome (M1→M2 **−3.5pp, p=.230**). Under `lr=1e-6`, LoRA `r=16`, and `n=4` rollouts per prompt, GRPO produced no detectable gain (M2→M3 **+0.5pp, exact McNemar p=1.000; CI includes 0**). The GRPO contract is `total_training_steps=500` with `save_freq=50`; this run stopped at 100 optimizer steps and selected step50. Infrastructure invalidity is 1–2%, above the project’s `<1%` target, and remains in the denominator.
 
 ## ShopSimulator
 
@@ -63,9 +63,9 @@ The audited collection counts are 2,100 valid strategy attempts, 2,370 append-on
 | M0 | Qwen3.5-2B base | Tool-use baseline |
 | M1 | M0 + Outcome action-only LoRA SFT | First qualifying successful trajectory |
 | M2 | M0 + Process action-only LoRA SFT | Same-task process-aware selection |
-| M3 | M2 + online GRPO; 500-step contract; controlled stop and export at optimizer step 100 | Test for an additional online-reward gain |
+| M3 | M2 + online GRPO; 500-step contract; controlled stop at optimizer step 100; step-50 export | Test for an additional online-reward gain |
 
-SFT computes loss only on assistant action tokens; the query and environment observations are masked. M3 starts from M2. Its frozen contract is `total_training_steps=500` and `save_freq=50`; this run stopped at 100 optimizer steps through an internal exact-step barrier and used the step-100 export for evaluation.
+SFT computes loss only on assistant action tokens; the query and environment observations are masked. M3 starts from M2. Its frozen contract is `total_training_steps=500` and `save_freq=50`; this run stopped at 100 optimizer steps through an internal exact-step barrier and used the step-50 export for Final-200.
 
 ## Training method
 
@@ -86,13 +86,13 @@ Infrastructure-invalid tasks stay in the denominator and are `not_judged` on the
 | M0 Base | 2/200 (1.0%) | 2 | 5.40 | −0.100 |
 | M1 Outcome SFT | 137/200 (68.5%) | 3 | 12.05 | +0.584 |
 | M2 Process SFT | 130/200 (65.0%) | 4 | 11.50 | +0.553 |
-| M3 GRPO step100 | 139/200 (69.5%) | 2 | 11.25 | +0.602 |
+| M3 GRPO step50 | 131/200 (65.5%) | 2 | 11.05 | +0.563 |
 
-Paired deltas are M0→M1 +67.5pp (p<0.0001), M1→M2 −3.5pp (p=.230), and M2→M3 +4.5pp (16 wins, 7 losses; exact McNemar p=.093). See the [v1 results report](docs/results-v1.md).
+Paired deltas are M0→M1 +67.5pp (p<0.0001), M1→M2 −3.5pp (p=.230), and M2→M3 +0.5pp (exact McNemar p=1.000; paired CI includes 0). See the [v1 results report](docs/results-v1.md).
 
 ## Interpretation and limitations
 
-The evidence supports successful-trajectory SFT as the main capability source. It does not show that Process selection is better, nor does it generalize the GRPO finding beyond this recipe. The precise claim is that step100 improves directionally over M2, but does not reach the 0.05 significance level on this sample.
+The evidence supports successful-trajectory SFT as the main capability source. It does not show that Process selection is better, nor does it generalize the GRPO finding beyond this recipe. The precise claim is: under this recipe, GRPO produced no detectable gain.
 
 Limitations include one fixed-protocol Final-200 run (no estimate of seed variance), a simulated shopping environment, 1–2% infrastructure invalidity above the `<1%` target, a 500-step GRPO contract that was controlled-stopped at 100 optimizer steps with a small LoRA update and one learning rate, and an LLM judge intended for explanation rather than replacing deterministic strict success.
 

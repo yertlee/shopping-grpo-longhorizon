@@ -117,6 +117,6 @@ bash scripts/export_grpo.sh \
 
 The formal contract is `total_training_steps=500`. For the current v1 run, an
 exact-step barrier stopped training in a controlled manner at optimizer step
-100; the reported M3 model is the step-100 export. This is the reported result
+100; the reported M3 model is the step-50 export. This is the frozen result
 used in the Final-200 aggregate comparison and must not be generalized to
 other GRPO recipes.

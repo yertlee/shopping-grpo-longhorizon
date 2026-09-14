@@ -15,9 +15,9 @@
 | M0 Base | 2/200（1.0%）|
 | M1 Outcome SFT | 137/200（68.5%）|
 | M2 Process SFT | 130/200（65.0%）|
-| M3 GRPO（step100 导出）| 139/200（69.5%）|
+| M3 GRPO（step50 导出）| 131/200（65.5%）|
 
-主要结论：SFT 带来主要增益（M0→M1 **+67.5pp，p<0.0001**）；Process 选择没有优于 Outcome（M1→M2 **−3.5pp，p=.230**）；在 `lr=1e-6`、LoRA `r=16`、每 prompt `n=4` 的配方下，GRPO step100 相对 M2 提升 **+4.5pp**（16 题改善、7 题回退，双侧 exact McNemar **p=.093**），方向正向但未达到 0.05 显著性水平。GRPO 合同为 `total_training_steps=500`、`save_freq=50`，本次在 100 optimizer steps 后受控停止并导出 step100；基础设施无效率为 1–2%，超过项目设定的 `<1%` 门槛，且保留在评测分母中。
+主要结论：SFT 带来主要增益（M0→M1 **+67.5pp，p<0.0001**）；Process 选择没有优于 Outcome（M1→M2 **−3.5pp，p=.230**）；在 `lr=1e-6`、LoRA `r=16`、每 prompt `n=4` 的配方下，GRPO 未产生可检测增益（M2→M3 **+0.5pp，exact McNemar p=1.000，CI 含 0**）。GRPO 合同为 `total_training_steps=500`、`save_freq=50`，本次在 100 optimizer steps 后受控停止并选择 step50；基础设施无效率为 1–2%，超过项目设定的 `<1%` 门槛，且保留在评测分母中。
 
 ## ShopSimulator
 
@@ -63,9 +63,9 @@ flowchart LR
 | M0 | Qwen3.5-2B base | 原始工具使用基线 |
 | M1 | M0 + Outcome Action-only LoRA SFT | 第一条合格成功轨迹 |
 | M2 | M0 + Process Action-only LoRA SFT | 同 task 过程感知轨迹选择 |
-| M3 | M2 + 在线 GRPO；合同 500 steps；optimizer step 100 受控停止并导出 | 检验在线奖励能否继续提升 |
+| M3 | M2 + 在线 GRPO；合同 500 steps；optimizer step 100 受控停止；step50 导出 | 检验在线奖励能否继续提升 |
 
-SFT 只对 Assistant action token 计算 loss，用户 Query 和环境 Observation 被 mask。M3 是从 M2 checkpoint 开始的 LoRA GRPO；冻结合同为 `total_training_steps=500`、`save_freq=50`，本次通过内部 exact-step barrier 在 100 optimizer steps 后受控停止，评测使用 step100 导出。
+SFT 只对 Assistant action token 计算 loss，用户 Query 和环境 Observation 被 mask。M3 是从 M2 checkpoint 开始的 LoRA GRPO；冻结合同为 `total_training_steps=500`、`save_freq=50`，本次通过内部 exact-step barrier 在 100 optimizer steps 后受控停止，冻结用于 Final-200 的导出为 step50。
 
 ## 训练方法
 
@@ -91,13 +91,13 @@ SFT 只对 Assistant action token 计算 loss，用户 Query 和环境 Observati
 | M0 Base | 2/200（1.0%）| 2 | 5.40 | −0.100 |
 | M1 Outcome SFT | 137/200（68.5%）| 3 | 12.05 | +0.584 |
 | M2 Process SFT | 130/200（65.0%）| 4 | 11.50 | +0.553 |
-| M3 GRPO step100 | 139/200（69.5%）| 2 | 11.25 | +0.602 |
+| M3 GRPO step50 | 131/200（65.5%）| 2 | 11.05 | +0.563 |
 
-配对结果：M0→M1 为 +67.5pp（p<0.0001）；M1→M2 为 −3.5pp（p=.230）；M2→M3 为 +4.5pp（16 题改善、7 题回退，exact McNemar p=.093）。详见 [v1 结果报告](docs/results-v1.md)。
+配对结果：M0→M1 为 +67.5pp（p<0.0001）；M1→M2 为 −3.5pp（p=.230）；M2→M3 为 +0.5pp（exact McNemar p=1.000，配对 CI 含 0）。详见 [v1 结果报告](docs/results-v1.md)。
 
 ## 解释与限制
 
-结果支持“成功轨迹 SFT 是主要能力来源”，但不支持“Process 选择必然更好”，也不支持在本配方之外泛化 GRPO 结论。GRPO 的准确表述是“step100 相对 M2 呈正向提升，但当前样本下未达到 0.05 显著性水平”。
+结果支持“成功轨迹 SFT 是主要能力来源”，但不支持“Process 选择必然更好”，也不支持在本配方之外泛化 GRPO 结论。GRPO 的结果应表述为“在该配方下未产生可检测增益”，而不是普遍宣称有效或无效。
 
 主要限制包括：Final-200 只有一次固定协议运行，未估计随机种子方差；评测依赖 ShopSimulator 的模拟商品与工具界面；1–2% infrastructure invalid 高于 `<1%` 目标；GRPO 合同为 500 steps，但本次在 100 optimizer steps 受控停止，且只使用 LoRA 小更新量和单一学习率；LLM Judge 适合解释，不替代确定性 strict success。
 
